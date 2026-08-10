@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aurea v2 - Login</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Firebase -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
+  
+  <style>
+    :root {
+      --c-brand: #de591f;
+      --c-brand-light: #fff7ed;
+      --c-brand-dark: #c74d1a;
+      --c-body: #f6f6f6;
+      --c-card-bg: #ffffff;
+      --c-text: #262727;
+      --c-text-light: #6b7280;
+      --c-text-dark: #212020;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--c-body) !important;
+      min-height: 100vh;
+      position: relative;
+    }
+    
+    /* Seguridad: fondo forzado que no se puede quitar */
+    body::before {
+      content: '';
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: var(--c-body);
+      z-index: -1;
+      pointer-events: none;
+    }
+    
+    body::after {
+      content: '';
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: var(--c-body);
+      z-index: -2;
+      pointer-events: none;
+    }
+    
+    .shake {
+      animation: shake 0.5s;
+    }
+    
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      10%, 30%, 50%, 70%, 90% { transform: translateX(-10px); }
+      20%, 40%, 60%, 80% { transform: translateX(10px); }
+    }
+    
+    .fade-in {
+      animation: fadeIn 0.3s;
+    }
+    
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body>
+  
+  <!-- Pantalla de Login con PIN -->
+  <div id="login-screen" class="min-h-screen flex items-center justify-center p-4">
+    <div class="rounded-3xl shadow-2xl p-8 max-w-md w-full fade-in" style="background: var(--c-card-bg); border: 1px solid #e5e7eb;">
+      
+      <!-- Logo / Título -->
+      <div class="text-center mb-8">
+        <h1 class="text-4xl font-bold mb-2" style="color: var(--c-text-dark);">Aurea v2</h1>
+        <p style="color: var(--c-text-light);">Gestión de Presupuestos</p>
+      </div>
+      
+      <!-- PIN Input -->
+      <div class="mb-8">
+        <label class="block text-sm font-medium mb-2 text-center" style="color: var(--c-text);">Ingresá tu PIN</label>
+        <input 
+          type="password" 
+          id="pin-input" 
+          required
+          inputmode="numeric"
+          pattern="[0-9]*"
+          maxlength="6"
+          placeholder="••••"
+          autocomplete="off"
+          autofocus
+          class="w-full px-4 py-3 border-2 rounded-lg text-center text-2xl tracking-widest focus:outline-none focus:ring-2 focus:border-transparent"
+          style="background: #ffffff; border-color: #d1d5db; color: var(--c-text-dark);"
+          onfocus="this.style.borderColor='var(--c-brand)'; this.style.boxShadow='0 0 0 2px rgba(222, 89, 31, 0.2)'"
+          onblur="this.style.borderColor='#d1d5db'; this.style.boxShadow='none'"
+        />
+        <p id="pin-error" class="text-center text-sm text-red-500 h-5 mt-2"></p>
+        <p class="text-center text-xs mt-1" style="color: var(--c-text-light);">4-6 dígitos numéricos</p>
+      </div>
+      
+      <!-- Acciones -->
+      <div class="space-y-3">
+        <button id="login-btn" class="w-full text-white py-3 rounded-lg font-semibold transition shadow-md" style="background: var(--c-brand);" onmouseover="this.style.opacity='0.9'" onmouseout="this.style.opacity='1'">
+          Ingresar
+        </button>
+        
+        <button id="register-toggle" class="w-full text-sm font-medium" style="color: var(--c-brand);" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">
+          ¿Primera vez? Registrarse
+        </button>
+        
+        <button id="forgot-pin" class="w-full text-xs" style="color: var(--c-text-light);" onmouseover="this.style.color='var(--c-text)'" onmouseout="this.style.color='var(--c-text-light)'">
+          Olvidé mi PIN
+        </button>
+      </div>
+      
+    </div>
+  </div>
+  
+  <!-- Pantalla de Registro (oculta por defecto) -->
+  <div id="register-screen" class="min-h-screen flex items-center justify-center p-4 hidden">
+    <div class="rounded-3xl shadow-2xl p-8 max-w-md w-full fade-in" style="background: var(--c-card-bg); border: 1px solid #e5e7eb;">
+      
+      <div class="text-center mb-8">
+        <h1 class="text-3xl font-bold mb-2" style="color: var(--c-text-dark);">Crear cuenta</h1>
+        <p style="color: var(--c-text-light);">Configurá tu acceso con PIN</p>
+      </div>
+      
+      <form id="register-form" class="space-y-4">
+        
+        <div>
+          <label class="block text-sm font-medium mb-2" style="color: var(--c-text);">Email</label>
+          <input 
+            type="email" 
+            id="register-email" 
+            required
+            placeholder="tu@email.com"
+            class="w-full px-4 py-3 border rounded-lg focus:outline-none focus:ring-2"
+            style="background: #ffffff; border-color: #d1d5db; color: var(--c-text-dark);"
+            onfocus="this.style.borderColor='var(--c-brand)'; this.style.boxShadow='0 0 0 2px rgba(222, 89, 31, 0.2)'"
+            onblur="this.style.borderColor='#d1d5db'; this.style.boxShadow='none'"
+          />
+        </div>
+        
+        <div>
+          <label class="block text-sm font-medium mb-2" style="color: var(--c-text);">PIN (4-6 dígitos)</label>
+          <input 
+            type="password" 
+            id="register-pin" 
+            required
+            inputmode="numeric"
+            pattern="[0-9]*"
+            maxlength="6"
+            placeholder="Ej: 1234"
+            autocomplete="off"
+            class="w-full px-4 py-3 border rounded-lg focus:outline-none focus:ring-2"
+            style="background: #ffffff; border-color: #d1d5db; color: var(--c-text-dark);"
+            onfocus="this.style.borderColor='var(--c-brand)'; this.style.boxShadow='0 0 0 2px rgba(222, 89, 31, 0.2)'"
+            onblur="this.style.borderColor='#d1d5db'; this.style.boxShadow='none'"
+          />
+        </div>
+        
+        <div>
+          <label class="block text-sm font-medium mb-2" style="color: var(--c-text);">Confirmar PIN</label>
+          <input 
+            type="password" 
+            id="register-pin-confirm" 
+            required
+            inputmode="numeric"
+            pattern="[0-9]*"
+            maxlength="6"
+            placeholder="Repetí tu PIN"
+            autocomplete="off"
+            class="w-full px-4 py-3 border rounded-lg focus:outline-none focus:ring-2"
+            style="background: #ffffff; border-color: #d1d5db; color: var(--c-text-dark);"
+            onfocus="this.style.borderColor='var(--c-brand)'; this.style.boxShadow='0 0 0 2px rgba(222, 89, 31, 0.2)'"
+            onblur="this.style.borderColor='#d1d5db'; this.style.boxShadow='none'"
+          />
+        </div>
+        
+        <p id="register-error" class="text-sm text-red-500 h-5"></p>
+        
+        <button 
+          type="submit" 
+          class="w-full text-white py-3 rounded-lg font-semibold transition shadow-md"
+          style="background: var(--c-brand);"
+          onmouseover="this.style.opacity='0.9'"
+          onmouseout="this.style.opacity='1'"
+        >
+          Registrarse
+        </button>
+        
+        <button 
+          type="button" 
+          id="back-to-login"
+          class="w-full text-sm font-medium"
+          style="color: var(--c-brand);"
+          onmouseover="this.style.opacity='0.8'"
+          onmouseout="this.style.opacity='1'"
+        >
+          ← Volver al login
+        </button>
+        
+      </form>
+      
+    </div>
+  </div>
+  
+  <!-- Pantalla de Recuperación -->
+  <div id="recovery-screen" class="min-h-screen flex items-center justify-center p-4 hidden">
+    <div class="rounded-3xl shadow-2xl p-8 max-w-md w-full fade-in" style="background: var(--c-card-bg); border: 1px solid #e5e7eb;">
+      
+      <div class="text-center mb-8">
+        <h1 class="text-3xl font-bold mb-2" style="color: var(--c-text-dark);">Recuperar PIN</h1>
+        <p style="color: var(--c-text-light);">Te enviaremos un link por email</p>
+      </div>
+      
+      <form id="recovery-form" class="space-y-4">
+        
+        <div>
+          <label class="block text-sm font-medium mb-2" style="color: var(--c-text);">Email registrado</label>
+          <input 
+            type="email" 
+            id="recovery-email" 
+            required
+            placeholder="tu@email.com"
+            class="w-full px-4 py-3 border rounded-lg focus:outline-none focus:ring-2"
+            style="background: #ffffff; border-color: #d1d5db; color: var(--c-text-dark);"
+            onfocus="this.style.borderColor='var(--c-brand)'; this.style.boxShadow='0 0 0 2px rgba(222, 89, 31, 0.2)'"
+            onblur="this.style.borderColor='#d1d5db'; this.style.boxShadow='none'"
+          />
+        </div>
+        
+        <p id="recovery-message" class="text-sm h-5"></p>
+        
+        <button 
+          type="submit" 
+          class="w-full text-white py-3 rounded-lg font-semibold transition shadow-md"
+          style="background: var(--c-brand);"
+          onmouseover="this.style.opacity='0.9'"
+          onmouseout="this.style.opacity='1'"
+        >
+          Enviar email
+        </button>
+        
+        <button 
+          type="button" 
+          id="back-to-login-2"
+          class="w-full text-sm font-medium"
+          style="color: var(--c-brand);"
+          onmouseover="this.style.opacity='0.8'"
+          onmouseout="this.style.opacity='1'"
+        >
+          ← Volver al login
+        </button>
+        
+      </form>
+      
+    </div>
+  </div>
+  
+  <!-- Scripts -->
+  <script src="firebase-config.js"></script>
+  <script src="auth.js"></script>
+  
+  <!-- Protección ligera contra inspección -->
+  <script>
+    (function() {
+      'use strict';
+      
+      // Protección simple: inyectar estilos inline en el body al cargar
+      document.addEventListener('DOMContentLoaded', function() {
+        document.body.style.setProperty('background', '#008f82', 'important');
+        document.body.style.setProperty('background-color', '#008f82', 'important');
+      });
+    })();
+  </script>
+  
+  <script>
+    // ========================================
+    // ELEMENTOS
+    // ========================================
+    
+    const loginScreen = document.getElementById('login-screen');
+    const registerScreen = document.getElementById('register-screen');
+    const recoveryScreen = document.getElementById('recovery-screen');
+    
+    const pinInput = document.getElementById('pin-input');
+    const pinError = document.getElementById('pin-error');
+    const loginBtn = document.getElementById('login-btn');
+    
+    const registerToggle = document.getElementById('register-toggle');
+    const backToLoginBtn = document.getElementById('back-to-login');
+    const backToLoginBtn2 = document.getElementById('back-to-login-2');
+    const forgotPinBtn = document.getElementById('forgot-pin');
+    
+    const registerForm = document.getElementById('register-form');
+    const registerError = document.getElementById('register-error');
+    
+    const recoveryForm = document.getElementById('recovery-form');
+    const recoveryMessage = document.getElementById('recovery-message');
+    
+    // ========================================
+    // VALIDACIÓN DE PIN (solo números)
+    // ========================================
+    
+    pinInput.addEventListener('input', (e) => {
+      // Permitir solo números
+      e.target.value = e.target.value.replace(/[^0-9]/g, '');
+      pinError.textContent = '';
+    });
+    
+    // Enter para login
+    pinInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        handleLogin();
+      }
+    });
+    
+    // ========================================
+    // LOGIN
+    // ========================================
+    
+    async function handleLogin() {
+      const pin = pinInput.value.trim();
+      
+      if (pin.length < 4 || pin.length > 6) {
+        pinError.textContent = 'El PIN debe tener entre 4 y 6 dígitos';
+        pinInput.classList.add('shake');
+        setTimeout(() => pinInput.classList.remove('shake'), 500);
+        return;
+      }
+      
+      if (!/^\d+$/.test(pin)) {
+        pinError.textContent = 'El PIN solo puede contener números';
+        return;
+      }
+      
+      try {
+        loginBtn.disabled = true;
+        loginBtn.textContent = 'Verificando...';
+        
+        await Auth.loginWithPIN(pin);
+        
+        // Migrar datos locales si existen
+        await Auth.migrateLocalData();
+        
+        // Redirigir a la app principal
+        window.location.href = 'index.html';
+        
+      } catch (error) {
+        pinError.textContent = error.message || 'PIN incorrecto';
+        pinInput.classList.add('shake');
+        setTimeout(() => pinInput.classList.remove('shake'), 500);
+        pinInput.value = '';
+        pinInput.focus();
+        loginBtn.disabled = false;
+        loginBtn.textContent = 'Ingresar';
+      }
+    }
+    
+    loginBtn.addEventListener('click', handleLogin);
+    
+    // ========================================
+    // REGISTRO
+    // ========================================
+    
+    registerToggle.addEventListener('click', () => {
+      loginScreen.classList.add('hidden');
+      registerScreen.classList.remove('hidden');
+      pinInput.value = '';
+    });
+    
+    backToLoginBtn.addEventListener('click', () => {
+      registerScreen.classList.add('hidden');
+      loginScreen.classList.remove('hidden');
+      registerError.textContent = '';
+    });
+    
+    // Validación de solo números en inputs de registro
+    document.getElementById('register-pin').addEventListener('input', (e) => {
+      e.target.value = e.target.value.replace(/[^0-9]/g, '');
+    });
+    
+    document.getElementById('register-pin-confirm').addEventListener('input', (e) => {
+      e.target.value = e.target.value.replace(/[^0-9]/g, '');
+    });
+    
+    registerForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      const email = document.getElementById('register-email').value.trim();
+      const pin = document.getElementById('register-pin').value;
+      const pinConfirm = document.getElementById('register-pin-confirm').value;
+      
+      // Validaciones
+      if (pin !== pinConfirm) {
+        registerError.textContent = 'Los PINs no coinciden';
+        return;
+      }
+      
+      if (pin.length < 4 || pin.length > 6) {
+        registerError.textContent = 'El PIN debe tener entre 4 y 6 dígitos';
+        return;
+      }
+      
+      try {
+        const submitBtn = registerForm.querySelector('button[type="submit"]');
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Creando cuenta...';
+        
+        await Auth.register(email, pin);
+        
+        // Guardar email para login futuro (usar sessionStorage en modo demo)
+        if (window.isDemoMode) {
+          sessionStorage.setItem('aurea_user_email', email);
+        } else {
+          localStorage.setItem('aurea_user_email', email);
+        }
+        
+        // Auto-login
+        await Auth.loginWithEmail(email, pin);
+        
+        // Migrar datos si existen
+        await Auth.migrateLocalData();
+        
+        // Redirigir
+        window.location.href = 'index.html';
+        
+      } catch (error) {
+        registerError.textContent = error.message || 'Error al registrarse';
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Registrarse';
+      }
+    });
+    
+    // ========================================
+    // RECUPERACIÓN
+    // ========================================
+    
+    forgotPinBtn.addEventListener('click', () => {
+      loginScreen.classList.add('hidden');
+      recoveryScreen.classList.remove('hidden');
+      pinInput.value = '';
+    });
+    
+    backToLoginBtn2.addEventListener('click', () => {
+      recoveryScreen.classList.add('hidden');
+      loginScreen.classList.remove('hidden');
+      recoveryMessage.textContent = '';
+    });
+    
+    recoveryForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      const email = document.getElementById('recovery-email').value.trim();
+      
+      try {
+        const submitBtn = recoveryForm.querySelector('button[type="submit"]');
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Enviando...';
+        
+        await Auth.sendPasswordReset(email);
+        
+        recoveryMessage.className = 'text-sm text-green-600 h-5';
+        recoveryMessage.textContent = '✅ Email enviado! Revisá tu bandeja de entrada';
+        
+        setTimeout(() => {
+          recoveryScreen.classList.add('hidden');
+          loginScreen.classList.remove('hidden');
+          recoveryMessage.textContent = '';
+        }, 3000);
+        
+      } catch (error) {
+        recoveryMessage.className = 'text-sm text-red-500 h-5';
+        recoveryMessage.textContent = error.message || 'Error al enviar email';
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Enviar email';
+      }
+    });
+    
+    // ========================================
+    // CHECK AUTENTICACIÓN
+    // ========================================
+    
+    Auth.onAuthStateChanged((user) => {
+      if (user) {
+        // Ya está logueado, redirigir a la app
+        window.location.href = 'index.html';
+      }
+    });
+    
+  </script>
+  
+</body>
+</html>

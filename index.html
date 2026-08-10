@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="es" class="h-full">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aurea — Gestión de Proyectos</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <!-- Tailwind CSS & Libraries -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // Configurar Tailwind con el nuevo color brand
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#fff7ed',
+              100: '#ffedd5',
+              200: '#fed7aa',
+              300: '#fdba74',
+              400: '#fb923c',
+              500: '#de591f',  // Brand color principal
+              600: '#c74d1a',
+              700: '#9a3412',
+              800: '#7c2d12',
+              900: '#6c1d05',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+  
+  <!-- Firebase SDK -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
+  <style>
+    :root {
+      --c-white: #f0f0f0;
+      --c-brand: #de591f;
+      --c-brand-light: #fff7ed;
+      --c-brand-dark: #c74d1a;
+      --c-body: #f6f6f6;
+      --c-sidebar: #ffffff;
+      --c-sidebar-hover: #f0fdf9;
+      --c-text: #262727;
+      --c-text-light: #6b7280;
+      --c-text-dark: #212020;
+    }
+    
+    /* Ocultar app hasta que pase auth check */
+    body.auth-loading #main-wrapper,
+    body.auth-loading #sidebar {
+      display: none !important;
+    }
+    
+    body.auth-loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background: var(--c-body);
+    }
+    
+    body.auth-loading::before {
+      content: '';
+      width: 50px;
+      height: 50px;
+      border: 4px solid rgba(255,255,255,0.3);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    
+    body { font-family: 'Inter', -apple-system, sans-serif; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
+
+    /* Sidebar */
+    #sidebar { transition: transform 0.25s ease; background: var(--c-sidebar); border-right: 1px solid #e5e7eb; }
+    .nav-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 14px; border-radius: 8px;
+      font-size: 14px; font-weight: 500; color: #6b7280;
+      cursor: pointer; transition: all 0.15s;
+      text-decoration: none;
+    }
+    .nav-item:hover { background: var(--c-sidebar-hover); color: var(--c-text-dark); }
+    .nav-item.active { background: var(--c-brand-light); color: var(--c-brand-dark); }
+    .nav-item .icon { width: 18px; height: 18px; flex-shrink: 0; opacity: 0.7; }
+    .nav-item.active .icon { opacity: 1; }
+    .nav-label { display: flex; align-items: center; gap: 6px; font-size: 11px;
+      font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em;
+      color: #475569; padding: 14px 14px 6px; }
+
+    /* Cards */
+    .kpi-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px;
+      padding: 20px; transition: box-shadow 0.15s; }
+    .kpi-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.07); }
+
+    /* Tables */
+    .data-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    .data-table th { text-align: left; padding: 10px 14px; font-size: 11px;
+      font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+      color: #64748b; border-bottom: 1px solid #e2e8f0; background: #f8fafc; }
+    .data-table td { padding: 12px 14px; border-bottom: 1px solid #f1f5f9;
+      color: #334155; vertical-align: middle; }
+    .data-table tr:last-child td { border-bottom: none; }
+    .data-table tr:hover td { background: #fafafa; }
+    .table-wrap { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; overflow: hidden; }
+
+    /* Badges */
+    .badge { display: inline-flex; align-items: center; padding: 3px 10px;
+      border-radius: 20px; font-size: 11px; font-weight: 600; }
+    .badge-gray { background: #f1f5f9; color: #64748b; }
+    .badge-blue { background: #eff6ff; color: #2563eb; }
+    .badge-yellow { background: #fefce8; color: #ca8a04; }
+    .badge-green { background: #f0fdf4; color: #16a34a; }
+    .badge-red { background: #fef2f2; color: #dc2626; }
+    .badge-orange { background: var(--c-brand-light); color: var(--c-brand-dark); }
+    .badge-purple { background: #faf5ff; color: #7c3aed; }
+
+    /* Buttons */
+    .btn { display: inline-flex; align-items: center; gap: 7px; padding: 9px 18px;
+      border-radius: 9px; font-size: 14px; font-weight: 600; cursor: pointer;
+      transition: all 0.15s; border: none; outline: none; }
+    .btn-primary { background: var(--c-brand); color: #fff; }
+    .btn-primary:hover { opacity: 0.9; box-shadow: 0 2px 8px rgba(222,89,31,.3); }
+    .btn-secondary { background: #f8fafc; color: #334155; border: 1px solid #e2e8f0; }
+    .btn-secondary:hover { background: #f1f5f9; }
+    .btn-danger { background: #fef2f2; color: #dc2626; border: 1px solid #fee2e2; }
+    .btn-danger:hover { background: #fee2e2; }
+    .btn-sm { padding: 6px 12px; font-size: 12px; border-radius: 7px; }
+    .btn-icon { padding: 7px; border-radius: 8px; }
+
+    /* Form inputs */
+    .form-input, .form-select, .form-textarea {
+      width: 100%; padding: 9px 13px; border: 1.5px solid #e2e8f0;
+      border-radius: 9px; font-size: 14px; color: #1e293b; background: #fff;
+      transition: border-color 0.15s, box-shadow 0.15s; outline: none;
+      font-family: inherit;
+    }
+    .form-input:focus, .form-select:focus, .form-textarea:focus {
+      border-color: var(--c-brand); box-shadow: 0 0 0 3px rgba(222,89,31,0.12);
+    }
+    .form-label { display: block; font-size: 13px; font-weight: 600;
+      color: #374151; margin-bottom: 6px; }
+    .form-group { margin-bottom: 18px; }
+
+    /* Tabs */
+    .tab-bar { display: flex; gap: 2px; border-bottom: 2px solid #e2e8f0;
+      margin-bottom: 24px; }
+    .tab-btn { padding: 10px 18px; font-size: 14px; font-weight: 600;
+      color: #64748b; cursor: pointer; border-bottom: 2px solid transparent;
+      margin-bottom: -2px; transition: all 0.15s; border-radius: 8px 8px 0 0; }
+    .tab-btn:hover { color: var(--c-brand); background: var(--c-brand-light); }
+    .tab-btn.active { color: var(--c-brand); border-bottom-color: var(--c-brand); background: transparent; }
+
+    /* Line items table for budgets */
+    .li-table { width: 100%; border-collapse: collapse; }
+    .li-table th { text-align: left; padding: 8px 10px; font-size: 12px;
+      font-weight: 600; color: #64748b; background: #f8fafc; border-bottom: 1px solid #e2e8f0; }
+    .li-table td { padding: 6px 4px; border-bottom: 1px solid #f1f5f9; }
+    .li-table input { width: 100%; padding: 7px 10px; border: 1.5px solid #e2e8f0;
+      border-radius: 7px; font-size: 13px; outline: none; font-family: inherit; }
+    .li-table input:focus { border-color: #f97316; }
+
+    /* Status dot */
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+
+    /* Loading */
+    .spinner { border: 3px solid #f3f3f3; border-top: 3px solid var(--c-brand);
+      border-radius: 50%; width: 24px; height: 24px; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Mobile overlay */
+    #sidebar-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 25; }
+    @media (max-width: 1024px) {
+      #sidebar { transform: translateX(-100%); position: fixed; z-index: 30; }
+      #sidebar.open { transform: translateX(0); }
+      #sidebar-overlay.show { display: block; }
+      #main-wrapper { margin-left: 0 !important; }
+    }
+
+    /* Empty state */
+    .empty-state { text-align: center; padding: 60px 20px; color: #94a3b8; }
+    .empty-state svg { width: 56px; height: 56px; margin: 0 auto 16px; opacity: .4; }
+    .empty-state p { font-size: 15px; font-weight: 500; color: #64748b; }
+    .empty-state small { font-size: 13px; }
+
+    /* Print */
+    @media print {
+      #sidebar, header { display: none !important; }
+      #main-wrapper { margin-left: 0 !important; }
+      body { background: white !important; }
+    }
+
+    /* Swal custom */
+    .swal2-popup { font-family: 'Inter', sans-serif !important; border-radius: 16px !important; }
+    .swal2-title { font-size: 18px !important; }
+    .swal2-confirm { background: var(--c-brand) !important; border-radius: 9px !important; }
+    .swal2-cancel { border-radius: 9px !important; }
+  </style>
+</head>
+<body style="background: #f8fafc;" class="h-full auth-loading">
+
+  <!-- Sidebar overlay (mobile) -->
+  <div id="sidebar-overlay" onclick="closeSidebar()"></div>
+
+  <!-- Sidebar -->
+  <aside id="sidebar" class="w-60 flex flex-col h-screen fixed left-0 top-0 select-none">
+    <!-- Logo -->
+    <div class="px-5 py-5 flex items-center gap-3" style="border-bottom: 1px solid #e5e7eb;">
+      <div class="w-9 h-9 rounded-xl flex items-center justify-center shadow-lg flex-shrink-0" style="background: var(--c-brand);">
+        <svg viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-white">
+          <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
+        </svg>
+      </div>
+      <div>
+        <div class="font-bold text-lg leading-none tracking-tight" style="color: var(--c-text-dark);">Aurea</div>
+        <div class="text-xs mt-0.5" style="color: var(--c-text-light);">Gestión de Proyectos</div>
+      </div>
+    </div>
+
+    <!-- Nav -->
+    <nav class="flex-1 overflow-y-auto p-3 space-y-0.5">
+      <div class="nav-label">Principal</div>
+      <a class="nav-item" data-route="#/" onclick="navigate('#/')">
+        <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+        Inicio
+      </a>
+      <a class="nav-item" data-route="#/presupuestos" onclick="navigate('#/presupuestos')">
+        <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+        Presupuesto
+      </a>
+      <a class="nav-item" data-route="#/projects" onclick="navigate('#/projects')">
+        <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7a2 2 0 012-2h3.28a2 2 0 011.664.89l.812 1.22A2 2 0 0012.28 8H19a2 2 0 012 2v7a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+        Proyectos
+      </a>
+      <a class="nav-item" data-route="#/facturas" onclick="navigate('#/facturas')">
+        <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 14l6-6m-5.5.5h.01m4.99 5h.01M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16l3.5-2 3.5 2 3.5-2 3.5 2z"/></svg>
+        Facturas
+      </a>
+      <a class="nav-item" data-route="#/administraciones" onclick="navigate('#/administraciones')">
+        <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        Administracíón
+      </a>
+
+      <div class="nav-label" style="padding-top:18px">Sistema</div>
+      <a class="nav-item" data-route="#/settings" onclick="navigate('#/settings')">
+        <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+        Configuracion
+      </a>
+    </nav>
+
+    <!-- Version -->
+    <div class="p-4" style="border-top: 1px solid #e5e7eb;">
+      <div class="text-xs text-center" style="color: var(--c-text-light);">Aurea v2.0</div>
+    </div>
+  </aside>
+
+  <!-- Main wrapper -->
+  <div id="main-wrapper" class="ml-60 flex flex-col min-h-screen">
+    <!-- Top header -->
+    <header class="bg-white border-b border-gray-200 px-6 py-0 flex items-center justify-between sticky top-0 z-20 h-14">
+      <div class="flex items-center gap-3">
+        <!-- Mobile hamburger -->
+        <button class="lg:hidden p-2 rounded-lg hover:bg-gray-100" onclick="openSidebar()">
+          <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
+        <!-- Breadcrumb -->
+        <nav id="breadcrumb" class="flex items-center gap-2 text-sm text-gray-500">
+          <span class="font-semibold text-gray-900">Dashboard</span>
+        </nav>
+      </div>
+      <!-- Header actions -->
+      <div class="flex items-center gap-2">
+        <!-- Dynamic action buttons -->
+        <div id="header-actions"></div>
+        
+        <!-- Logout Button (fixed) -->
+        <button onclick="Auth.logout()" class="btn-sm btn-secondary flex items-center gap-2" title="Cerrar sesión">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
+          </svg>
+          Cerrar sesión
+        </button>
+      </div>
+    </header>
+
+    <!-- Content -->
+    <main id="main-content" class="flex-1 p-6 lg:p-8">
+      <div class="flex items-center justify-center h-64">
+        <div class="spinner"></div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Firebase Config & Auth -->
+  <script src="./firebase-config.js"></script>
+  <script src="./auth.js"></script>
+  
+  <!-- Authentication Guard -->
+  <script>
+    // Verificar autenticación antes de cargar la app
+    Auth.onAuthStateChanged((user) => {
+      if (!user) {
+        // No autenticado, redirigir a login inmediatamente
+        window.location.replace('login.html');
+      } else {
+        // Autenticado, quitar loading y mostrar app
+        document.body.classList.remove('auth-loading');
+        
+        // Inicializar DB y cargar la app
+        DB.init().then(() => {
+          console.log('✅ App lista');
+        }).catch(err => {
+          console.error('❌ Error inicializando app:', err);
+        });
+      }
+    });
+  </script>
+  
+  <!-- Database & App -->
+  <script src="./db-firebase.js"></script>
+  <script src="./app.js"></script>
+  <script src="./datos-ejemplo.js"></script>
+</body>
+</html>
