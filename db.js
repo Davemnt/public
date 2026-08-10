@@ -206,17 +206,24 @@ const DB = (() => {
    * - percentUsed: Porcentaje usado del presupuesto
    */
   function getProjectFinancials(projectId) {
-    const operations = getOperationsByProject(projectId);
+    // Use incomes and expenses collections to compute financials
+    const incomes = _load('incomes').filter(i => i.projectId === projectId);
+    const expenses = _load('expenses').filter(e => e.projectId === projectId);
+    const totalIncome = incomes.reduce((s, r) => s + (Number(r.amount || r.monto || 0) || 0), 0);
+    const totalExpense = expenses.reduce((s, r) => s + (Number(r.amount || r.monto || 0) || 0), 0);
     const budget = getActiveBudget(projectId);
     const budgetTotal = getApprovedBudgetTotal(budget);
-    const totalSpent = operations
-      .filter(o => o.registrado)
-      .reduce((s, r) => s + (Number(r.monto) || 0), 0);
+    const remaining = budgetTotal - totalExpense;
+    const profit = totalIncome - totalExpense;
+    const percentUsed = budgetTotal > 0 ? (totalExpense / budgetTotal) * 100 : 0;
     return {
+      totalIncome,
+      totalExpense,
+      profit,
       budgetTotal,
-      totalSpent,
-      remaining: budgetTotal - totalSpent,
-      percentUsed: budgetTotal > 0 ? (totalSpent / budgetTotal) * 100 : 0,
+      totalSpent: totalExpense,
+      remaining,
+      percentUsed
     };
   }
 
@@ -240,44 +247,42 @@ const DB = (() => {
    */
   function getDashboardStats() {
     const projects = _load('projects');
-    const budgets   = _load('budgets');
-    const operations  = _load('operations');
-    
-    // Proyectos activos
-    const activeProjects = projects.filter(p => p.status === 'activo').length;
-    
+    const budgets = _load('budgets');
+    const incomes = _load('incomes');
+
+    // Proyectos activos (ahora: proyectos aprobados)
+    const activeProjects = projects.filter(p => p.status === 'aprobado').length;
+
     // Presupuestos pendientes (borrador + enviado)
     const pendingBudgets = budgets.filter(b => ['borrador','enviado'].includes(b.status)).length;
-    
+
     // Presupuestos cancelados
     const cancelledBudgets = budgets.filter(b => b.status === 'rechazado').length;
-    
-    // Ganancias totales por administración
-    const earningsARG = operations
-      .filter(o => o.tipo === 'ingreso' && o.administration === 'ARG')
-      .reduce((s, r) => s + (Number(r.monto) || 0), 0);
-    
-    const earningsPERU = operations
-      .filter(o => o.tipo === 'ingreso' && o.administration === 'PERU')
-      .reduce((s, r) => s + (Number(r.monto) || 0), 0);
-    
-    const earningsUSA = operations
-      .filter(o => o.tipo === 'ingreso' && o.administration === 'USA')
-      .reduce((s, r) => s + (Number(r.monto) || 0), 0);
-    
+
+    // Ganancias totales por administración (asociamos cada ingreso a la administración del proyecto)
+    const earnings = { ARG: 0, PERU: 0, USA: 0 };
+    incomes.forEach(i => {
+      const proj = _load('projects').find(p => p.id === i.projectId) || {};
+      const adm = proj.administration || i.administration || 'ARG';
+      const amt = Number(i.amount || i.monto || 0) || 0;
+      if (adm === 'ARG') earnings.ARG += amt;
+      else if (adm === 'PERU') earnings.PERU += amt;
+      else if (adm === 'USA') earnings.USA += amt;
+    });
+
+    const earningsARG = earnings.ARG;
+    const earningsPERU = earnings.PERU;
+    const earningsUSA = earnings.USA;
     const totalEarnings = earningsARG + earningsPERU + earningsUSA;
-    
-    // Stats adicionales para administraciones
+
     const totalProjects = projects.length;
-    const completedProjects = projects.filter(p => p.status === 'completado').length;
-    
-    const totalSpent = operations
-      .filter(o => o.tipo === 'egreso')
-      .reduce((s, r) => s + (Number(r.monto) || 0), 0);
-    
-    return { 
-      activeProjects, 
-      pendingBudgets, 
+    const completedProjects = projects.filter(p => p.status === 'aprobado').length;
+
+    const totalSpent = _load('expenses').reduce((s, r) => s + (Number(r.amount || r.monto || 0) || 0), 0);
+
+    return {
+      activeProjects,
+      pendingBudgets,
       cancelledBudgets,
       earningsARG,
       earningsPERU,
@@ -303,15 +308,18 @@ const DB = (() => {
         earningsUSA: 0
       });
     }
-    _load('operations').filter(o => o.tipo === 'ingreso').forEach(r => {
-      const key = (r.fecha || '').slice(0, 7);
+    // Aggregate from incomes collection
+    const incomes = _load('incomes');
+    incomes.forEach(r => {
+      const key = (r.date || r.fecha || r.createdAt || '').slice(0, 7);
       const m = months.find(x => x.key === key);
-      if (m) {
-        const amount = Number(r.monto) || 0;
-        if (r.administration === 'ARG') m.earningsARG += amount;
-        else if (r.administration === 'PERU') m.earningsPERU += amount;
-        else if (r.administration === 'USA') m.earningsUSA += amount;
-      }
+      if (!m) return;
+      const proj = _load('projects').find(p => p.id === r.projectId) || {};
+      const adm = proj.administration || r.administration || 'ARG';
+      const amount = Number(r.amount || r.monto) || 0;
+      if (adm === 'ARG') m.earningsARG += amount;
+      else if (adm === 'PERU') m.earningsPERU += amount;
+      else if (adm === 'USA') m.earningsUSA += amount;
     });
     return months;
   }
@@ -343,6 +351,19 @@ const DB = (() => {
         projectCounter: 0,
       });
     }
+    // Migración de estados de proyecto existentes → normalizar a 'pendiente'/'aprobado'
+    try {
+      const projs = _load('projects');
+      projs.forEach(p => {
+        const current = p.status || p.estado || '';
+        if (current === 'aprobado' || current === 'pendiente') return;
+        const mapped = (current === 'completado' || current === 'activo') ? 'aprobado' : 'pendiente';
+        // Actualizar tanto 'status' como 'estado' para compatibilidad
+        const upd = { ...(p || {}), status: mapped, estado: mapped };
+        update('projects', p.id, upd);
+      });
+    } catch (e) { /* ignore migration errors */ }
+
     // Demo data si no hay proyectos
     if (!_load('projects').length) {
       const pid = _id();
@@ -352,7 +373,8 @@ const DB = (() => {
         cliente: 'Cliente Ejemplo',
         administracion: 'US', 
         moneda: 'USD', 
-        estado: 'activo',
+        estado: 'aprobado',
+        status: 'aprobado',
         fechaCreacion: new Date().toISOString(),
         fechaInicio: null,
         notas: 'Proyecto de demostración',

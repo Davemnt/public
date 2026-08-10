@@ -28,23 +28,20 @@ async function cargarDatosEjemplo() {
           id: '1',
           description: 'Diseño arquitectónico completo',
           quantity: 1,
-          unit: 'proyecto',
           unitPrice: 2500000,
           total: 2500000
         },
         {
           id: '2',
           description: 'Planos estructurales',
-          quantity: 15,
-          unit: 'planos',
+          qty: 15,
           unitPrice: 80000,
           total: 1200000
         },
         {
           id: '3',
           description: 'Modelado 3D y renders',
-          quantity: 8,
-          unit: 'renders',
+          qty: 8,
           unitPrice: 150000,
           total: 1200000
         }
@@ -68,24 +65,21 @@ async function cargarDatosEjemplo() {
         {
           id: '1',
           description: 'Diseño de interiores - Lobby',
-          quantity: 1,
-          unit: 'proyecto',
+          qty: 1,
           unitPrice: 15000,
           total: 15000
         },
         {
           id: '2',
           description: 'Diseño de interiores - Restaurante',
-          quantity: 1,
-          unit: 'proyecto',
+          qty: 1,
           unitPrice: 18000,
           total: 18000
         },
         {
           id: '3',
           description: 'Selección de mobiliario',
-          quantity: 1,
-          unit: 'servicio',
+          qty: 1,
           unitPrice: 5000,
           total: 5000
         }
@@ -109,24 +103,21 @@ async function cargarDatosEjemplo() {
         {
           id: '1',
           description: 'Diseño conceptual de oficinas',
-          quantity: 1,
-          unit: 'proyecto',
+          qty: 1,
           unitPrice: 25000,
           total: 25000
         },
         {
           id: '2',
           description: 'Espacios colaborativos y salas de reunión',
-          quantity: 8,
-          unit: 'ambientes',
+          qty: 8,
           unitPrice: 3500,
           total: 28000
         },
         {
           id: '3',
           description: 'Renders fotorrealistas 4K',
-          quantity: 12,
-          unit: 'renders',
+          qty: 12,
           unitPrice: 800,
           total: 9600
         }

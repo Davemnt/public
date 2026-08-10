@@ -177,6 +177,31 @@
       border-radius: 7px; font-size: 13px; outline: none; font-family: inherit; }
     .li-table input:focus { border-color: #f97316; }
 
+    /* Description editable cell in line-items */
+    .li-desc {
+      width: 100%;
+      min-height: 40px;
+      padding: 8px 10px;
+      border: 1.5px solid #e2e8f0;
+      border-radius: 7px;
+      font-size: 13px;
+      color: #1e293b;
+      background: #fff;
+      outline: none;
+    }
+    .li-desc:focus {
+      border-color: var(--c-brand);
+      box-shadow: 0 0 0 3px rgba(222,89,31,0.08);
+    }
+    .li-desc[contenteditable="false"] { background:#f8fafc; color:#64748b; }
+    /* Placeholder for contenteditable */
+    .li-desc[data-placeholder]:empty:before {
+      content: attr(data-placeholder);
+      color: #94a3b8;
+      pointer-events: none;
+      display: block;
+    }
+
     /* Status dot */
     .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
 
@@ -243,7 +268,7 @@
       </a>
       <a class="nav-item" data-route="#/presupuestos" onclick="navigate('#/presupuestos')">
         <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-        Presupuesto
+        Presupuestos
       </a>
       <a class="nav-item" data-route="#/projects" onclick="navigate('#/projects')">
         <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7a2 2 0 012-2h3.28a2 2 0 011.664.89l.812 1.22A2 2 0 0012.28 8H19a2 2 0 012 2v7a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>

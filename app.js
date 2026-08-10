@@ -32,10 +32,8 @@ const ADMIN = {
  * PROJECT_STATUS - Estados posibles de un proyecto
  */
 const PROJECT_STATUS = {
-  activo:     { label: 'Activo',      badge: 'badge-blue'   },
-  pausado:    { label: 'Pausado',     badge: 'badge-yellow' },
-  completado: { label: 'Completado',  badge: 'badge-green'  },
-  cancelado:  { label: 'Cancelado',   badge: 'badge-red'    },
+  pendiente: { label: 'Pendiente', badge: 'badge-yellow' },
+  aprobado:  { label: 'Aprobado',  badge: 'badge-green'  },
 };
 
 /**
@@ -50,12 +48,12 @@ const PROJECT_STATUS = {
  * NOTA: Cuando cambiás a 'aprobado-parcial', aparecen checkboxes para marcar items
  */
 const BUDGET_STATUS = {
-  borrador:           { label: 'Borrador',           badge: 'badge-gray'   },
+  borrador:           { label: 'Presupuestado',      badge: 'badge-gray'   },
   enviado:            { label: 'Enviado',            badge: 'badge-blue'   },
-  'aprobado-total':   { label: 'Aprobado Total',    badge: 'badge-green'  },
-  'aprobado-parcial': { label: 'Aprobado Parcial',  badge: 'badge-yellow' },
-  rechazado:          { label: 'Rechazado',          badge: 'badge-red'    },
-  cancelado:          { label: 'Cancelado',          badge: 'badge-gray'   },
+  'aprobado-total':   { label: 'Aprobado (total)',    badge: 'badge-green'  },
+  'aprobado-parcial': { label: 'Aprobado (parcial)',  badge: 'badge-green'  },
+  rechazado:          { label: 'Rechazado',           badge: 'badge-gray'   },
+  cancelado:          { label: 'Cancelado',           badge: 'badge-gray'   },
 };
 
 const INVOICE_STATUS = {
@@ -512,7 +510,7 @@ function renderProjectForm(id) {
           <div class="form-group">
             <label class="form-label">Estado</label>
             <select id="pf-status" class="form-select">
-              ${Object.entries(PROJECT_STATUS).map(([k,v]) => `<option value="${k}" ${project?.status===k||(!project&&k==='cotizacion')?'selected':''}>${v.label}</option>`).join('')}
+              ${Object.entries(PROJECT_STATUS).map(([k,v]) => `<option value="${k}" ${project?.status===k||(!project&&k==='pendiente')?'selected':''}>${v.label}</option>`).join('')}
             </select>
           </div>
         </div>
@@ -589,7 +587,6 @@ function renderProjectDetail(id, tab = 'info') {
 
   const tabs = [
     { key: 'info',       label: 'Informacion general' },
-    { key: 'budgets',    label: 'Presupuesto' },
     { key: 'operations', label: 'Operaciones' },
     ...(showInvoices ? [{ key: 'invoices', label: 'Facturacion' }] : []),
     { key: 'documents',  label: 'Documentos' },
@@ -643,7 +640,10 @@ function renderTabInfo(p) {
   return `
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
       <div class="bg-white border border-gray-200 rounded-2xl p-6 space-y-4">
-        <h3 class="font-semibold text-gray-900 border-b border-gray-100 pb-3">Datos del Proyecto</h3>
+        <div class="flex items-center justify-between border-b border-gray-100 pb-3">
+          <h3 class="font-semibold text-gray-900">Datos del Proyecto</h3>
+          <button class="btn btn-sm btn-secondary" onclick="showEditProject('${p.id}')">Editar</button>
+        </div>
         ${[
           ['Nombre', p.name], ['Cliente', p.client||'—'], ['Fecha', fmtDate(p.date)],
           ['Estado', PROJECT_STATUS[p.status]?.label||p.status],
@@ -736,7 +736,7 @@ function renderBudgetForm(projectId, budgetId) {
     { label: `Presupuesto #${(typeof num === 'number' ? String(num).padStart(3,'0') : String(num))}` },
   ]);
   
-  const canApprove = budget && ['enviado', 'borrador'].includes(budget.status) && !existingProject;
+  const canApprove = budget && ['enviado', 'borrador'].includes(budget.status);
   const isApproved = false; // Budgets can always be edited, even when approved
   
   setActions(`
@@ -755,7 +755,7 @@ function renderBudgetForm(projectId, budgetId) {
     </button>
   `);
 
-  const items = budget?.items || [{ description: '', qty: 1, unit: '', unitPrice: 0, aprobado: false }];
+  const items = budget?.items || [{ description: '', qty: 1, unitPrice: 0, aprobado: false }];
   const statusOpts = Object.entries(BUDGET_STATUS).map(([k,v]) =>
     `<option value="${k}" ${(budget?.status||'borrador')===k?'selected':''}>${v.label}</option>`).join('');
 
@@ -767,9 +767,10 @@ function renderBudgetForm(projectId, budgetId) {
       ${showApprovalCol ? `<td style="text-align:center;width:60px">
         <input type="checkbox" ${it.aprobado ? 'checked' : ''} ${isReadOnly ? 'disabled' : ''} onchange="toggleItemApproval(${i})" style="width:18px;height:18px;cursor:pointer">
       </td>` : ''}
-      <td><input type="text" placeholder="Descripción del ítem" value="${esc(it.description||'')}" oninput="updateLiRow(${i})" ${isReadOnly ? 'disabled' : ''}></td>
+      <td>
+        <div class="li-desc" data-placeholder="Descripción del ítem..." contenteditable="${!isReadOnly}" oninput="updateLiRow(${i})" onkeydown="liDescKeyDown(event, ${i})" onfocus="window._currentEditableIndex=${i}">${it.description ? it.description : ''}</div>
+      </td>
       <td style="width:80px"><input type="number" min="0" value="${it.qty||1}" oninput="updateLiRow(${i})" id="li-qty-${i}" ${isReadOnly ? 'disabled' : ''}></td>
-      <td style="width:100px"><input type="text" placeholder="unidad" value="${esc(it.unit||'')}" oninput="updateLiRow(${i})" ${isReadOnly ? 'disabled' : ''}></td>
       <td style="width:130px"><input type="number" min="0" step="0.01" value="${it.unitPrice||0}" oninput="updateLiRow(${i})" id="li-up-${i}" ${isReadOnly ? 'disabled' : ''}></td>
       <td style="width:150px;text-align:right;padding-right:12px;font-weight:600;color:#374151" id="li-total-${i}">${fmtCurrency((it.qty||1)*(it.unitPrice||0), budget?.administration || adm.code.slice(0, -1))}</td>
       ${!isReadOnly ? `<td style="width:40px">
@@ -871,6 +872,18 @@ function renderBudgetForm(projectId, budgetId) {
           <h3 class="font-semibold text-gray-900">Ítems del Presupuesto</h3>
           <span class="text-xs font-semibold admin-badge" style="color: ${adm.flagColor}">${adm.flag} ${adm.label} · ${adm.code}</span>
         </div>
+        <div class="p-3 border-b border-gray-100" style="background:#fff">
+          <div id="li-toolbar" style="display:flex;gap:8px;align-items:center">
+            <button class="btn btn-sm btn-secondary" onclick="execFormat('bold')" title="Negrita"><span style="font-weight:700">N</span></button>
+            <button class="btn btn-sm btn-secondary" onclick="execFormat('italic')" title="Cursiva"><span style="font-style:italic;font-weight:600">K</span></button>
+            <select onchange="execFormat('fontSize', this.value)" class="form-select" style="max-width:120px">
+              <option value="">Tamaño</option>
+              <option value="2">Pequeño</option>
+              <option value="3">Normal</option>
+              <option value="5">Grande</option>
+            </select>
+          </div>
+        </div>
         <div class="overflow-x-auto">
           <table class="li-table w-full" id="li-table">
             <thead>
@@ -878,7 +891,7 @@ function renderBudgetForm(projectId, budgetId) {
                 ${showApprovalCol ? '<th style="width:60px;text-align:center">✓ Aprobado</th>' : ''}
                 <th style="min-width:200px">Descripción</th>
                 <th style="width:80px">Cant.</th>
-                <th style="width:100px">Unidad</th>
+                <!-- Unidad column removed per request -->
                 <th style="width:130px">P. Unitario</th>
                 <th style="width:150px;text-align:right;padding-right:12px">Total</th>
                 <th style="width:40px"></th>
@@ -964,15 +977,21 @@ function renderBudgetForm(projectId, budgetId) {
     const rows = document.querySelectorAll('#li-tbody tr');
     const row = rows[i];
     if (!row) return;
-    const inputs = row.querySelectorAll('input');
     const currentStatus = window._currentBudgetStatus || 'borrador';
     const offset = currentStatus !== 'borrador' ? 1 : 0;
+    const descEl = row.querySelector('.li-desc');
+    const qtyEl = row.querySelector('input[type="number"]');
+    const upEl = row.querySelector('input[id^="li-up-"]');
+    const descHtml = descEl ? descEl.innerHTML : (window._liItems[i].description || '');
+    const descText = descEl ? descEl.innerText.trim() : '';
+    // Normalize empty description
+    if (descEl && descText === '') descEl.innerHTML = '';
+    if (descEl) descEl.classList.toggle('empty', descEl.innerText.trim() === '');
     window._liItems[i] = {
       ...window._liItems[i],
-      description: inputs[offset].value,
-      qty: Number(inputs[offset+1].value) || 0,
-      unit: inputs[offset+2].value,
-      unitPrice: Number(inputs[offset+3].value) || 0,
+      description: descHtml,
+      qty: Number(qtyEl?.value) || 0,
+      unitPrice: Number(upEl?.value) || 0,
     };
     const total = (window._liItems[i].qty) * (window._liItems[i].unitPrice);
     document.getElementById(`li-total-${i}`).textContent = fmtCurrency(total, window._budgetAdm);
@@ -981,8 +1000,13 @@ function renderBudgetForm(projectId, budgetId) {
 
   window.addLiRow = () => {
     if (window._budgetIsApproved) return;
-    window._liItems.push({ description: '', qty: 1, unit: '', unitPrice: 0, aprobado: false });
+    window._liItems.push({ description: '', qty: 1, unitPrice: 0, aprobado: false });
+    const newIndex = window._liItems.length - 1;
     rebuildLiTable();
+    setTimeout(() => {
+      const el = document.querySelector(`#li-row-${newIndex} .li-desc`);
+      if (el) { el.focus(); placeCaretAtEnd(el); }
+    }, 0);
   };
 
   window.removeLiRow = (i) => {
@@ -1034,23 +1058,24 @@ function renderBudgetForm(projectId, budgetId) {
         ${showApprovalCol ? `<td style="text-align:center;width:60px">
           <input type="checkbox" ${it.aprobado ? 'checked' : ''} ${isReadOnly ? 'disabled' : ''} onchange="toggleItemApproval(${i})" style="width:18px;height:18px;cursor:pointer">
         </td>` : ''}
-        <td><input type="text" placeholder="Descripción del ítem" value="${esc(it.description||'')}" oninput="updateLiRow(${i})" ${isReadOnly ? 'disabled' : ''}></td>
+        <td><div class="li-desc" contenteditable="${!isReadOnly}" oninput="updateLiRow(${i})" onfocus="window._currentEditableIndex=${i}">${it.description ? it.description : ''}</div></td>
         <td><input type="number" min="0" value="${it.qty||1}" oninput="updateLiRow(${i})" id="li-qty-${i}" ${isReadOnly ? 'disabled' : ''}></td>
-        <td><input type="text" placeholder="unidad" value="${esc(it.unit||'')}" oninput="updateLiRow(${i})" ${isReadOnly ? 'disabled' : ''}></td>
+        <!-- Unidad removed -->
         <td><input type="number" min="0" step="0.01" value="${it.unitPrice||0}" oninput="updateLiRow(${i})" id="li-up-${i}" ${isReadOnly ? 'disabled' : ''}></td>
         <td style="text-align:right;padding-right:12px;font-weight:600;color:#374151" id="li-total-${i}">${fmtCurrency((it.qty||1)*(it.unitPrice||0), window._budgetAdm)}</td>
         ${!isReadOnly ? `<td><button onclick="removeLiRow(${i})" class="btn btn-danger btn-icon btn-sm" style="padding:4px"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button></td>` : '<td></td>'}
       </tr>
     `}).join('');
     
-    // Update table headers
+    // Update table headers — show 'Unidad' only for ARG administration
     const thead = document.querySelector('#li-table thead tr');
     if (thead) {
+      const unitCol = '';
       thead.innerHTML = `
         ${showApprovalCol ? '<th style="width:60px;text-align:center">✓ Aprobado</th>' : ''}
         <th style="min-width:200px">Descripción</th>
         <th style="width:80px">Cant.</th>
-        <th style="width:100px">Unidad</th>
+        ${unitCol}
         <th style="width:130px">P. Unitario</th>
         <th style="width:150px;text-align:right;padding-right:12px">Total</th>
         <th style="width:40px"></th>
@@ -1058,6 +1083,38 @@ function renderBudgetForm(projectId, budgetId) {
     }
     
     updateTotals();
+  }
+
+  // Minimal rich text commands for li descriptions
+  window.execFormat = function(cmd, value) {
+    try {
+      document.execCommand(cmd, false, value || null);
+      if (typeof window._currentEditableIndex !== 'undefined') updateLiRow(window._currentEditableIndex);
+    } catch (e) { console.warn('Format error', e); }
+  }
+
+  // Place caret at end of contenteditable element
+  function placeCaretAtEnd(el) {
+    if (!el) return;
+    el.focus();
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } catch (e) { /* ignore */ }
+  }
+
+  // Handle Enter / Shift+Enter in li description cells
+  window.liDescKeyDown = function(e, index) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      // Create new item and focus it
+      addLiRow();
+    }
+    // Shift+Enter default: insert newline
   }
 }
 
@@ -1091,7 +1148,7 @@ window.showApprovalModal = async function(budgetId) {
     title: 'Aprobar Presupuesto',
     html: `
       <div class="text-left space-y-4" style="font-family: inherit;">
-        <p class="text-sm text-gray-600">Al aprobar este presupuesto, se creará automáticamente un proyecto activo.</p>
+        <p class="text-sm text-gray-600">Al aprobar este presupuesto, se creará automáticamente un proyecto aprobado.</p>
         <div class="bg-gray-50 p-4 rounded-lg">
           <p class="text-xs text-gray-500 mb-1">Total del presupuesto</p>
           <p class="text-2xl font-bold text-gray-900">${fmtCurrency(total, adm.code)}</p>
@@ -1170,7 +1227,7 @@ window.showApprovalModal = async function(budgetId) {
       name: budget.projectName,
       client: budget.clientName,
       administration: budget.administration,
-      status: 'activo',
+      status: 'aprobado',
       date: today(),
       budgetId: budgetId,
       budgetAmount: approvedAmount,
@@ -1300,7 +1357,7 @@ window.approveBudget = function(budgetId, projectId) {
   const budget = DB.get('budgets', budgetId);
   const project = DB.get('projects', projectId);
   if (!budget || !project) return;
-  DB.update('budgets', budgetId, { status: 'aprobado' });
+  DB.update('budgets', budgetId, { status: 'aprobado-total' });
   // Auto-income
   const existing = DB.getIncomesByProject(projectId).find(i => i.budgetId === budgetId);
   if (!existing) {
@@ -1312,7 +1369,7 @@ window.approveBudget = function(budgetId, projectId) {
     });
   }
   // Update budget status in form
-  document.getElementById('b-status').value = 'aprobado';
+  document.getElementById('b-status').value = 'aprobado-total';
   notify('¡Presupuesto aprobado! Se registró el ingreso en Operaciones');
   renderBudgetForm(projectId, budgetId);
 };
@@ -1579,7 +1636,8 @@ function renderInvoiceForm(projectId, invoiceId) {
     <button class="btn btn-primary btn-sm" onclick="saveInvoiceForm('${projectId}','${invoiceId||''}')">💾 Guardar</button>
   `);
 
-  const items = inv?.items || [{ description: '', qty: 1, unit: 'unit', unitPrice: 0 }];
+  const showUnit = false; // Unidad removed for all administrations
+  const items = inv?.items || [{ description: '', qty: 1, unit: (showUnit? 'unit' : ''), unitPrice: 0 }];
   const statusOpts = Object.entries(INVOICE_STATUS).map(([k,v]) =>
     `<option value="${k}" ${(inv?.status||'borrador')===k?'selected':''}>${v.label}</option>`).join('');
 
@@ -1613,12 +1671,21 @@ function renderInvoiceForm(projectId, invoiceId) {
         </div>
         <div class="overflow-x-auto">
           <table class="li-table w-full" id="inv-li-table">
-            <thead><tr><th style="min-width:200px">Description</th><th style="width:80px">Qty</th><th style="width:80px">Unit</th><th style="width:120px">Unit Price</th><th style="width:130px;text-align:right;padding-right:12px">Amount</th><th style="width:40px"></th></tr></thead>
+            <thead>
+              <tr>
+                <th style="min-width:200px">Description</th>
+                <th style="width:80px">Qty</th>
+                ${showUnit ? '<th style="width:100px">Unidad</th>' : ''}
+                <th style="width:120px">Unit Price</th>
+                <th style="width:130px;text-align:right;padding-right:12px">Amount</th>
+                <th style="width:40px"></th>
+              </tr>
+            </thead>
             <tbody id="inv-li-tbody">${items.map((it,i) => `
               <tr id="inv-li-row-${i}">
                 <td><input type="text" placeholder="Service description" value="${esc(it.description||'')}" oninput="updateInvRow(${i})"></td>
                 <td><input type="number" min="0" value="${it.qty||1}" oninput="updateInvRow(${i})" id="inv-qty-${i}"></td>
-                <td><input type="text" value="${esc(it.unit||'unit')}" oninput="updateInvRow(${i})"></td>
+                ${showUnit ? `<td><input type="text" value="${esc(it.unit||'')}" oninput="updateInvRow(${i})"></td>` : ''}
                 <td><input type="number" min="0" step="0.01" value="${it.unitPrice||0}" oninput="updateInvRow(${i})" id="inv-up-${i}"></td>
                 <td style="text-align:right;padding-right:12px;font-weight:600;color:#374151" id="inv-total-${i}">${fmtCurrency((it.qty||1)*(it.unitPrice||0),'USA')}</td>
                 <td><button onclick="removeInvRow(${i})" class="btn btn-danger btn-icon btn-sm" style="padding:4px"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button></td>
@@ -1648,22 +1715,33 @@ function renderInvoiceForm(projectId, invoiceId) {
     const rows = document.querySelectorAll('#inv-li-tbody tr');
     if (!rows[i]) return;
     const inputs = rows[i].querySelectorAll('input');
-    window._invItems[i] = { description: inputs[0].value, qty: Number(inputs[1].value)||0, unit: inputs[2].value, unitPrice: Number(inputs[3].value)||0 };
+    // inputs: description, qty, (unit?), unitPrice
+    if (showUnit) {
+      window._invItems[i] = { description: inputs[0].value, qty: Number(inputs[1].value)||0, unit: inputs[2].value, unitPrice: Number(inputs[3].value)||0 };
+    } else {
+      window._invItems[i] = { description: inputs[0].value, qty: Number(inputs[1].value)||0, unitPrice: Number(inputs[2].value)||0 };
+    }
     document.getElementById(`inv-total-${i}`).textContent = fmtCurrency(window._invItems[i].qty * window._invItems[i].unitPrice, 'USA');
     document.getElementById('inv-total-grand').textContent = fmtCurrency(calcBudgetTotal(window._invItems), 'USA');
   };
   window.addInvRow = () => {
-    window._invItems.push({ description:'', qty:1, unit:'unit', unitPrice:0 });
+    const newItem = showUnit ? { description:'', qty:1, unit:'', unitPrice:0 } : { description:'', qty:1, unitPrice:0 };
+    window._invItems.push(newItem);
     const i = window._invItems.length - 1;
     const tr = document.createElement('tr'); tr.id = `inv-li-row-${i}`;
-    tr.innerHTML = `<td><input type="text" placeholder="Service description" oninput="updateInvRow(${i})"></td><td><input type="number" min="0" value="1" oninput="updateInvRow(${i})"></td><td><input type="text" value="unit" oninput="updateInvRow(${i})"></td><td><input type="number" min="0" step="0.01" value="0" oninput="updateInvRow(${i})"></td><td style="text-align:right;padding-right:12px;font-weight:600;color:#374151" id="inv-total-${i}">${fmtCurrency(0,'USA')}</td><td><button onclick="removeInvRow(${i})" class="btn btn-danger btn-icon btn-sm" style="padding:4px"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button></td>`;
+    if (showUnit) {
+      tr.innerHTML = `<td><input type="text" placeholder="Service description" oninput="updateInvRow(${i})"></td><td><input type="number" min="0" value="1" oninput="updateInvRow(${i})"></td><td><input type="text" oninput="updateInvRow(${i})"></td><td><input type="number" min="0" step="0.01" value="0" oninput="updateInvRow(${i})"></td><td style="text-align:right;padding-right:12px;font-weight:600;color:#374151" id="inv-total-${i}">${fmtCurrency(0,'USA')}</td><td><button onclick="removeInvRow(${i})" class="btn btn-danger btn-icon btn-sm" style="padding:4px"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button></td>`;
+    } else {
+      tr.innerHTML = `<td><input type="text" placeholder="Service description" oninput="updateInvRow(${i})"></td><td><input type="number" min="0" value="1" oninput="updateInvRow(${i})"></td><td><input type="number" min="0" step="0.01" value="0" oninput="updateInvRow(${i})"></td><td style="text-align:right;padding-right:12px;font-weight:600;color:#374151" id="inv-total-${i}">${fmtCurrency(0,'USA')}</td><td><button onclick="removeInvRow(${i})" class="btn btn-danger btn-icon btn-sm" style="padding:4px"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button></td>`;
+    }
     document.getElementById('inv-li-tbody').appendChild(tr);
   };
   window.removeInvRow = (i) => {
     window._invItems.splice(i, 1);
-    document.getElementById('inv-li-tbody').innerHTML = window._invItems.map((it,j) => `
-      <tr id="inv-li-row-${j}"><td><input type="text" value="${esc(it.description||'')}" oninput="updateInvRow(${j})"></td><td><input type="number" value="${it.qty||1}" oninput="updateInvRow(${j})"></td><td><input type="text" value="${esc(it.unit||'unit')}" oninput="updateInvRow(${j})"></td><td><input type="number" value="${it.unitPrice||0}" oninput="updateInvRow(${j})"></td><td id="inv-total-${j}" style="text-align:right;padding-right:12px;font-weight:600">${fmtCurrency((it.qty||1)*(it.unitPrice||0),'USA')}</td><td><button onclick="removeInvRow(${j})" class="btn btn-danger btn-icon btn-sm" style="padding:4px"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button></td></tr>
-    `).join('');
+    document.getElementById('inv-li-tbody').innerHTML = window._invItems.map((it,j) => {
+      if (showUnit) return `<tr id="inv-li-row-${j}"><td><input type="text" value="${esc(it.description||'')}" oninput="updateInvRow(${j})"></td><td><input type="number" value="${it.qty||1}" oninput="updateInvRow(${j})"></td><td><input type="text" value="${esc(it.unit||'')}" oninput="updateInvRow(${j})"></td><td><input type="number" value="${it.unitPrice||0}" oninput="updateInvRow(${j})"></td><td id="inv-total-${j}" style="text-align:right;padding-right:12px;font-weight:600">${fmtCurrency((it.qty||1)*(it.unitPrice||0),'USA')}</td><td><button onclick="removeInvRow(${j})" class="btn btn-danger btn-icon btn-sm" style="padding:4px"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button></td></tr>`;
+      return `<tr id="inv-li-row-${j}"><td><input type="text" value="${esc(it.description||'')}" oninput="updateInvRow(${j})"></td><td><input type="number" value="${it.qty||1}" oninput="updateInvRow(${j})"></td><td><input type="number" value="${it.unitPrice||0}" oninput="updateInvRow(${j})"></td><td id="inv-total-${j}" style="text-align:right;padding-right:12px;font-weight:600">${fmtCurrency((it.qty||1)*(it.unitPrice||0),'USA')}</td><td><button onclick="removeInvRow(${j})" class="btn btn-danger btn-icon btn-sm" style="padding:4px"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button></td></tr>`;
+    }).join('');
     document.getElementById('inv-total-grand').textContent = fmtCurrency(calcBudgetTotal(window._invItems), 'USA');
   };
 }
@@ -1726,7 +1804,7 @@ function renderTracker() {
       <td class="font-medium text-gray-900">#${(typeof b.number === 'number' ? String(b.number).padStart(3,'0') : (b.number||b.budgetNumber||b.invoiceNumber||'(sin número)'))}</td>
       <td>
         <span class="font-semibold text-gray-900">${esc(b.projectName||'—')}</span>
-        ${project ? `<span class="text-xs text-gray-400 ml-2">(Proyecto activo)</span>` : ''}
+        ${project ? `<span class="text-xs text-gray-400 ml-2">(Proyecto aprobado)</span>` : ''}
       </td>
       <td class="text-gray-600">${esc(b.clientName||'—')}</td>
       <td>${b.administration ? adminBadge(b.administration) : '—'}</td>
@@ -1736,11 +1814,9 @@ function renderTracker() {
       <td onclick="event.stopPropagation()">
         <div class="flex gap-2">
           <button class="btn btn-secondary btn-sm" onclick="navigate('#/presupuestos/${b.id}')">Abrir</button>
-          ${!project && ['borrador', 'enviado'].includes(b.status) ? `
             <button class="btn btn-danger btn-sm btn-icon" onclick="deleteBudgetDirect('${b.id}')" title="Eliminar">
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
             </button>
-          ` : ''}
         </div>
       </td>
     </tr>`;
@@ -1780,6 +1856,10 @@ async function deleteBudgetDirect(budgetId) {
   if (!budget) return;
   const bnum = budget.number ?? budget.budgetNumber ?? '';
   if (!await confirmDelete(`Presupuesto #${(typeof bnum === 'number' ? String(bnum).padStart(3,'0') : String(bnum))}`)) return;
+  // Remove any incomes linked to this budget
+  try {
+    (DB.getAll('incomes') || []).filter(i => i.budgetId === budgetId).forEach(i => DB.remove('incomes', i.id));
+  } catch (e) { /* ignore if incomes not present */ }
   DB.remove('budgets', budgetId);
   notify('Presupuesto eliminado', 'info');
   renderTracker();
@@ -1868,10 +1948,10 @@ function renderAdministraciones() {
   setActions('');
 
   const cards = Object.entries(ADMIN).map(([key, a]) => {
-    const allProjects = DB.getAll('projects').filter(p => p.administration === key);
-    const activeProjects = allProjects.filter(p => p.status === 'activo');
-    const completedProjects = allProjects.filter(p => p.status === 'completado');
-    const totalProjects = allProjects.length;
+  const allProjects = DB.getAll('projects').filter(p => p.administration === key);
+  const pendingProjects = allProjects.filter(p => p.status === 'pendiente');
+  const approvedProjects = allProjects.filter(p => p.status === 'aprobado');
+  const totalProjects = allProjects.length;
     
     // Calculate earnings (only incomes, not expenses)
     const operations = DB.getAll('operations').filter(o => o.administration === key);
@@ -1891,12 +1971,12 @@ function renderAdministraciones() {
         <!-- Boxes de proyectos -->
         <div class="grid grid-cols-3 gap-3 mb-5">
           <div class="text-center p-3 rounded-xl" style="background: #F9F9F9; border: 2px solid #E7E7E7">
-            <p class="text-xs font-bold text-gray-500 uppercase mb-1">Activos</p>
-            <p class="text-2xl font-bold" style="color: ${a.flagColor}">${activeProjects.length}</p>
+            <p class="text-xs font-bold text-gray-500 uppercase mb-1">Pendientes</p>
+            <p class="text-2xl font-bold" style="color: ${a.flagColor}">${pendingProjects.length}</p>
           </div>
           <div class="text-center p-3 rounded-xl" style="background: #F9F9F9; border: 2px solid #E7E7E7">
-            <p class="text-xs font-bold text-gray-500 uppercase mb-1">Realizados</p>
-            <p class="text-2xl font-bold" style="color: ${a.flagColor}">${completedProjects.length}</p>
+            <p class="text-xs font-bold text-gray-500 uppercase mb-1">Aprobados</p>
+            <p class="text-2xl font-bold" style="color: ${a.flagColor}">${approvedProjects.length}</p>
           </div>
           <div class="text-center p-3 rounded-xl" style="background: ${a.flagColor}15; border: 2px solid ${a.flagColor}">
             <p class="text-xs font-bold uppercase mb-1" style="color: ${a.flagColor}">Totales</p>
@@ -2259,7 +2339,7 @@ function renderDemoDataSettings() {
           <div class="bg-gray-50 rounded-lg p-4 mb-4">
             <h4 class="text-sm font-semibold text-gray-900 mb-3">📊 Qué se creará:</h4>
             <ul class="space-y-2 text-sm text-gray-700">
-              <li class="flex items-start gap-2">
+                <li class="flex items-start gap-2">
                 <svg class="w-4 h-4 text-green-500 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                   <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
                 </svg>
@@ -2269,7 +2349,7 @@ function renderDemoDataSettings() {
                 <svg class="w-4 h-4 text-green-500 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                   <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
                 </svg>
-                <span><strong>1 Proyecto activo</strong> con todas sus etapas</span>
+                <span><strong>1 Proyecto aprobado</strong> con todas sus etapas</span>
               </li>
               <li class="flex items-start gap-2">
                 <svg class="w-4 h-4 text-green-500 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
@@ -2391,7 +2471,6 @@ window.exportBudgetPDF = function(budgetId) {
     date: isEnglish ? 'Date' : 'Fecha',
     description: isEnglish ? 'Description' : 'Descripción',
     qty: isEnglish ? 'Qty' : 'Cant.',
-    unit: isEnglish ? 'Unit' : 'Unidad',
     unitPrice: isEnglish ? 'Unit Price' : 'P. Unitario',
     total: isEnglish ? 'Total' : 'Total',
     totalBudget: isEnglish ? 'QUOTE TOTAL' : 'TOTAL PRESUPUESTO',
@@ -2445,7 +2524,6 @@ window.exportBudgetPDF = function(budgetId) {
             ${showApprovalCol ? '<th style="text-align:center;padding:12px 8px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;font-weight:700;border-bottom:2px solid #E7E7E7;width:50px">✓</th>' : ''}
             <th style="text-align:left;padding:12px 16px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;font-weight:700;border-bottom:2px solid #E7E7E7">${t.description}</th>
             <th style="text-align:center;padding:12px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;font-weight:700;border-bottom:2px solid #E7E7E7;width:60px">${t.qty}</th>
-            <th style="text-align:center;padding:12px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;font-weight:700;border-bottom:2px solid #E7E7E7;width:70px">${t.unit}</th>
             <th style="text-align:right;padding:12px 16px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;font-weight:700;border-bottom:2px solid #E7E7E7;width:120px">${t.unitPrice}</th>
             <th style="text-align:right;padding:12px 16px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;font-weight:700;border-bottom:2px solid #E7E7E7;width:130px">${t.total}</th>
           </tr>
@@ -2456,7 +2534,6 @@ window.exportBudgetPDF = function(budgetId) {
               ${showApprovalCol ? `<td style="text-align:center;padding:10px 8px;font-size:14px;border-bottom:1px solid #E7E7E7">${it.aprobado ? '✓' : ''}</td>` : ''}
               <td style="padding:12px 16px;font-size:13px;border-bottom:1px solid #E7E7E7;color:#334155">${esc(it.description||'')}</td>
               <td style="text-align:center;padding:12px 10px;font-size:13px;border-bottom:1px solid #E7E7E7;color:#334155;font-weight:600">${it.qty||0}</td>
-              <td style="text-align:center;padding:12px 10px;font-size:13px;color:#64748b;border-bottom:1px solid #E7E7E7">${esc(it.unit||'')}</td>
               <td style="text-align:right;padding:12px 16px;font-size:13px;border-bottom:1px solid #E7E7E7;color:#334155">${fmtCurrency(it.unitPrice||0, administration)}</td>
               <td style="text-align:right;padding:12px 16px;font-size:14px;font-weight:700;border-bottom:1px solid #E7E7E7;color:#1e293b">${fmtCurrency((it.qty||0)*(it.unitPrice||0), administration)}</td>
             </tr>
@@ -2534,7 +2611,6 @@ window.exportInvoicePDF = function(invoiceId) {
     project: isEnglish ? 'Project' : 'Proyecto',
     description: isEnglish ? 'Description' : 'Descripción',
     qty: isEnglish ? 'Qty' : 'Cant.',
-    unit: isEnglish ? 'Unit' : 'Unidad',
     unitPrice: isEnglish ? 'Unit Price' : 'P. Unitario',
     amount: isEnglish ? 'Amount' : 'Importe',
     totalDue: isEnglish ? 'TOTAL DUE' : 'TOTAL A PAGAR',
@@ -2582,7 +2658,7 @@ window.exportInvoicePDF = function(invoiceId) {
           <tr style="background:#f0fdf4">
             <th style="text-align:left;padding:10px 14px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:${adm.flagColor};border-bottom:2px solid #bbf7d0">${t.description}</th>
             <th style="text-align:center;width:60px;padding:10px;font-size:11px;text-transform:uppercase;color:${adm.flagColor};border-bottom:2px solid #bbf7d0">${t.qty}</th>
-            <th style="text-align:center;width:60px;padding:10px;font-size:11px;text-transform:uppercase;color:${adm.flagColor};border-bottom:2px solid #bbf7d0">${t.unit}</th>
+            
             <th style="text-align:right;width:120px;padding:10px 14px;font-size:11px;text-transform:uppercase;color:${adm.flagColor};border-bottom:2px solid #bbf7d0">${t.unitPrice}</th>
             <th style="text-align:right;width:130px;padding:10px 14px;font-size:11px;text-transform:uppercase;color:${adm.flagColor};border-bottom:2px solid #bbf7d0">${t.amount}</th>
           </tr>
@@ -2592,7 +2668,7 @@ window.exportInvoicePDF = function(invoiceId) {
             <tr style="background:${i%2?'#f8fafc':'#fff'}">
               <td style="padding:10px 14px;font-size:13px;border-bottom:1px solid #f1f5f9">${esc(it.description||'')}</td>
               <td style="text-align:center;padding:10px;font-size:13px;border-bottom:1px solid #f1f5f9">${it.qty||0}</td>
-              <td style="text-align:center;padding:10px;font-size:13px;color:#64748b;border-bottom:1px solid #f1f5f9">${esc(it.unit||'')}</td>
+              
               <td style="text-align:right;padding:10px 14px;font-size:13px;border-bottom:1px solid #f1f5f9">${fmtCurrency(it.unitPrice||0,project?.administration||'USA')}</td>
               <td style="text-align:right;padding:10px 14px;font-size:13px;font-weight:600;border-bottom:1px solid #f1f5f9">${fmtCurrency((it.qty||0)*(it.unitPrice||0),project?.administration||'USA')}</td>
             </tr>
