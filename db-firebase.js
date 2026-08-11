@@ -614,8 +614,8 @@ const DB = (() => {
     const budgets = getAll('budgets');
     const operations = getAll('operations');
     
-    // Proyectos activos
-    const activeProjects = projects.filter(p => p.status === 'activo').length;
+    // Proyectos activos — aceptar variantes de estado ('activo' o 'aprobado')
+    const activeProjects = projects.filter(p => ['activo','aprobado'].includes(p.status)).length;
     
     // Presupuestos pendientes (borrador + enviado)
     const pendingBudgets = budgets.filter(b => ['borrador','enviado'].includes(b.status)).length;
@@ -640,7 +640,8 @@ const DB = (() => {
     
     // Stats adicionales para administraciones
     const totalProjects = projects.length;
-    const completedProjects = projects.filter(p => p.status === 'completado').length;
+    // Contabilizar proyectos completados o aprobados como finalizados
+    const completedProjects = projects.filter(p => ['completado','aprobado'].includes(p.status)).length;
     
     const totalSpent = operations
       .filter(o => o.tipo === 'egreso')

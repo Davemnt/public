@@ -250,21 +250,35 @@ const DB = (() => {
     const budgets = _load('budgets');
     const incomes = _load('incomes');
 
-    // Proyectos activos (ahora: proyectos aprobados)
-    const activeProjects = projects.filter(p => p.status === 'aprobado').length;
+    // Proyectos activos — aceptar variantes 'activo' o 'aprobado'
+    const activeProjects = projects.filter(p => ['activo','aprobado'].includes(p.status)).length;
 
-    // Presupuestos pendientes (borrador + enviado)
-    const pendingBudgets = budgets.filter(b => ['borrador','enviado'].includes(b.status)).length;
+    // Presupuestos pendientes (aceptar variantes en inglés/español)
+    const pendingStates = ['borrador','enviado','pending','draft'];
+    const pendingBudgets = budgets.filter(b => pendingStates.includes((b.status||'').toString())).length;
 
-    // Presupuestos cancelados
-    const cancelledBudgets = budgets.filter(b => b.status === 'rechazado').length;
+    // Presupuestos cancelados (aceptar variantes)
+    const cancelledStates = ['rechazado','cancelado','cancelled'];
+    const cancelledBudgets = budgets.filter(b => cancelledStates.includes((b.status||'').toString())).length;
 
-    // Ganancias totales por administración (asociamos cada ingreso a la administración del proyecto)
+    // Ganancias totales por administración — sumar tanto 'incomes' como 'operations' tipo 'ingreso'
     const earnings = { ARG: 0, PERU: 0, USA: 0 };
+
+    // Sumar incomes (colección explícita de ingresos)
     incomes.forEach(i => {
       const proj = _load('projects').find(p => p.id === i.projectId) || {};
-      const adm = proj.administration || i.administration || 'ARG';
+      const adm = proj.administration || i.administration || i.currency || 'ARG';
       const amt = Number(i.amount || i.monto || 0) || 0;
+      if (adm === 'ARG') earnings.ARG += amt;
+      else if (adm === 'PERU') earnings.PERU += amt;
+      else if (adm === 'USA') earnings.USA += amt;
+    });
+
+    // También sumar operaciones tipo 'ingreso' si existen (datos históricos u otras inserciones)
+    const operations = _load('operations');
+    operations.filter(o => o.tipo === 'ingreso' || o.type === 'income').forEach(o => {
+      const adm = o.administration || o.administracion || o.adm || 'ARG';
+      const amt = Number(o.monto || o.amount || 0) || 0;
       if (adm === 'ARG') earnings.ARG += amt;
       else if (adm === 'PERU') earnings.PERU += amt;
       else if (adm === 'USA') earnings.USA += amt;
@@ -308,18 +322,30 @@ const DB = (() => {
         earningsUSA: 0
       });
     }
-    // Aggregate from incomes collection
+    // Aggregate from incomes collection and operations (tipo 'ingreso')
     const incomes = _load('incomes');
-    incomes.forEach(r => {
-      const key = (r.date || r.fecha || r.createdAt || '').slice(0, 7);
+    const operations = _load('operations');
+
+    const addToMonth = (dateStr, adm, amount) => {
+      const key = (dateStr || '').slice(0, 7);
       const m = months.find(x => x.key === key);
       if (!m) return;
-      const proj = _load('projects').find(p => p.id === r.projectId) || {};
-      const adm = proj.administration || r.administration || 'ARG';
-      const amount = Number(r.amount || r.monto) || 0;
       if (adm === 'ARG') m.earningsARG += amount;
       else if (adm === 'PERU') m.earningsPERU += amount;
       else if (adm === 'USA') m.earningsUSA += amount;
+    };
+
+    incomes.forEach(r => {
+      const amount = Number(r.amount || r.monto) || 0;
+      const proj = _load('projects').find(p => p.id === r.projectId) || {};
+      const adm = proj.administration || r.administration || r.currency || 'ARG';
+      addToMonth(r.date || r.fecha || r.createdAt, adm, amount);
+    });
+
+    operations.filter(o => o.tipo === 'ingreso' || o.type === 'income').forEach(o => {
+      const amount = Number(o.monto || o.amount) || 0;
+      const adm = o.administration || o.administracion || o.adm || 'ARG';
+      addToMonth(o.date || o.fecha || o.createdAt, adm, amount);
     });
     return months;
   }

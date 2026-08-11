@@ -602,6 +602,18 @@ const Auth = (() => {
   // INICIALIZACIÓN
   // ========================================
   
+  // En entornos locales (localhost / 127.0.0.1) permitir DevTools automáticamente
+  try {
+    const host = (window.location && window.location.hostname) || '';
+    if (host === 'localhost' || host === '127.0.0.1' || host === '') {
+      // Habilitar DevTools temporalmente (5 minutos)
+      localStorage.setItem('aurea_allow_devtools', String(Date.now() + 300000));
+      console.log('🔓 DevTools auto-habilitado en entorno local');
+    }
+  } catch (e) {
+    console.warn('No se pudo auto-habilitar DevTools:', e);
+  }
+
   // Activar protección anti-inspección
   enableAntiInspection();
   
