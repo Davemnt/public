@@ -25,7 +25,7 @@
 const ADMIN = {
   ARG:  { label: 'Argentina',       flag: 'AR', code: 'ARS', locale: 'es-AR', symbol: '$',   flagColor: '#0055A4', invoice: false },
   PERU: { label: 'Perú',            flag: 'PE', code: 'PEN', locale: 'es-PE', symbol: 'S/',  flagColor: '#DC0000', invoice: false },
-  USA:  { label: 'United States',   flag: 'US', code: 'USD', locale: 'en-US', symbol: 'U$D', flagColor: '#008f82', invoice: true  },
+  USA:  { label: 'United States',   flag: 'US', code: 'USD', locale: 'en-US', symbol: 'U$D', flagColor: '#2e7d32', invoice: true  },
 };
 
 /**
@@ -34,6 +34,7 @@ const ADMIN = {
 const PROJECT_STATUS = {
   pendiente: { label: 'Pendiente', badge: 'badge-yellow' },
   aprobado:  { label: 'Aprobado',  badge: 'badge-green'  },
+  finalizado:{ label: 'Finalizado', badge: 'badge-blue'   },
 };
 
 /**
@@ -74,17 +75,17 @@ const INVOICE_STATUS = {
  */
 function fmtCurrency(amount, adm) {
   const a = ADMIN[adm] || ADMIN.ARG;
-  try {
-    let s = new Intl.NumberFormat(a.locale, { style: 'currency', currency: a.code, minimumFractionDigits: 2 }).format(Number(amount) || 0);
-    // For USA, prefer U$D symbol instead of $ to avoid ambiguity
-    if ((adm === 'USA' || a.code === 'USD') && s.includes('$')) {
-      // Replace only the first occurrence of $ with U$D (handles $1,234.56 or US$1,234.56)
-      s = s.replace('$', a.symbol);
-    }
-    return s;
-  } catch {
-    return `${a.symbol}${(Number(amount) || 0).toLocaleString(a.locale, { minimumFractionDigits: 2 })}`;
+  const n = Number(amount) || 0;
+
+  if (adm === 'USA' || a.code === 'USD') {
+    return `USD ${n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
   }
+
+  if (a.code === 'PEN') {
+    return `S./ ${n.toLocaleString('es-PE', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+  }
+
+  return `$ ${n.toLocaleString('es-AR', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
 }
 
 function fmtDate(str) {
@@ -93,6 +94,13 @@ function fmtDate(str) {
     const [y,m,d] = str.split('-');
     return `${d}/${m}/${y}`;
   } catch { return str; }
+}
+
+function canGenerateInvoicesForProject(projectOrAdministration) {
+  const admin = typeof projectOrAdministration === 'string'
+    ? projectOrAdministration
+    : (projectOrAdministration && projectOrAdministration.administration) || '';
+  return admin === 'USA';
 }
 
 // Formatea referencias de presupuesto: convierte "yymmddNNN" → "yymmdd#NNN"
@@ -573,16 +581,13 @@ function renderProjectForm(id) {
         notes: document.getElementById('pf-notes').value.trim(),
       };
     }
-  }).then(r => {
+  }).then(async r => {
     if (!r.isConfirmed) return navigate(id ? `#/projects/${id}` : '#/projects');
     if (id) { DB.update('projects', id, r.value); notify('Proyecto actualizado'); navigate(`#/projects/${id}`); }
     else {
-      const p = DB.add('projects', r.value);
+      const p = await DB.add('projects', r.value);
       notify('Proyecto creado');
-      console.log('Project created:', p.id);
-      console.log('Lookup immediately after add:', DB.get('projects', p.id));
-      // Small delay to avoid routing race conditions, then navigate normally
-      setTimeout(() => navigate(`#/projects/${p.id}`), 50);
+      navigate(`#/projects/${p.id}`);
     }
   });
 }
@@ -752,12 +757,47 @@ function renderTabBudgets(project) {
 // ═══════════════════════════════════════════════════════════════
 // PRESUPUESTO — FORMULARIO COMPLETO
 // ═══════════════════════════════════════════════════════════════
-function calcBudgetTotal(items) {
-  return items.reduce((s, it) => s + ((Number(it.qty)||0) * (Number(it.unitPrice)||0)), 0);
+function getTaxLabel(administration = null, includeRate = true) {
+  const adm = String(administration || '').toUpperCase();
+  if (adm === 'PERU') return includeRate ? 'IGV 18%' : 'IGV';
+  if (adm === 'ARG') return includeRate ? 'IVA 21%' : 'IVA';
+  return includeRate ? 'IVA 21%' : 'IVA';
 }
 
-function calcApprovedTotal(items) {
-  return items.filter(it => it.aprobado).reduce((s, it) => s + ((Number(it.qty)||0) * (Number(it.unitPrice)||0)), 0);
+function syncBudgetTaxLabel(administration = null) {
+  const adm = String(administration || '').toUpperCase();
+  const label = document.querySelector('#budget-breakdown .text-blue-700 span:first-child');
+  const label2 = document.querySelector('.text-blue-700 span:first-child');
+  const target = label || label2;
+  if (target) target.textContent = getTaxLabel(adm, true);
+}
+
+function calcBudgetBreakdown(items, administration = null, ivaMode = null) {
+  const base = items.reduce((s, it) => s + ((Number(it.qty)||0) * (Number(it.unitPrice)||0)), 0);
+  const adm = String(administration || '').toUpperCase();
+  const mode = ivaMode || 'sin';
+  const subtotal = Number(base.toFixed(2));
+  const taxRate = (adm === 'ARG' && mode === 'con') ? 0.21 : ((adm === 'PERU' && mode === 'con') ? 0.18 : 0);
+  const ivaAmount = Number((base * taxRate).toFixed(2));
+  return {
+    subtotal,
+    iva: ivaAmount,
+    total: Number((subtotal + ivaAmount).toFixed(2)),
+  };
+}
+
+function calcBudgetTotal(items, administration = null, ivaMode = null) {
+  return calcBudgetBreakdown(items, administration, ivaMode).total;
+}
+
+function calcApprovedTotal(items, administration = null, ivaMode = null) {
+  const base = items.filter(it => it.aprobado).reduce((s, it) => s + ((Number(it.qty)||0) * (Number(it.unitPrice)||0)), 0);
+  const adm = String(administration || '').toUpperCase();
+  const mode = ivaMode || 'sin';
+  const subtotal = Number(base.toFixed(2));
+  const taxRate = (adm === 'ARG' && mode === 'con') ? 0.21 : ((adm === 'PERU' && mode === 'con') ? 0.18 : 0);
+  const ivaAmount = Number((base * taxRate).toFixed(2));
+  return Number((subtotal + ivaAmount).toFixed(2));
 }
 
 function renderBudgetForm(projectId, budgetId) {
@@ -784,6 +824,7 @@ function renderBudgetForm(projectId, budgetId) {
   const canApprove = budget && !existingProject;
   const isApproved = false; // Budgets can always be edited, even when approved
   
+  const canCreateInvoiceFromBudget = !!budget && canGenerateInvoicesForProject(budget.administration || (existingProject && existingProject.administration)) && ['aprobado-total','aprobado-parcial'].includes(budget.status);
   setActions(`
     <button class="btn btn-secondary btn-sm" onclick="navigate('#/presupuestos')">← Volver</button>
     ${budget ? `<button class="btn btn-secondary btn-sm" onclick="previewBudgetPDF('${budgetId}')" style="margin-right:8px">Vista previa</button>
@@ -795,7 +836,7 @@ function renderBudgetForm(projectId, budgetId) {
       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
       Aprobar Presupuesto
     </button>` : ''}
-    ${budget && ['aprobado-total','aprobado-parcial'].includes(budget.status) ? `<button class="btn btn-warning btn-sm" onclick="createInvoiceFromBudget('${budgetId}')" style="margin-left:8px">
+    ${canCreateInvoiceFromBudget ? `<button class="btn btn-warning btn-sm" onclick="createInvoiceFromBudget('${budgetId}')" style="margin-left:8px">
       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v8m4-4H8"/></svg>
       Crear factura desde presupuesto
     </button>` : ''}
@@ -806,6 +847,11 @@ function renderBudgetForm(projectId, budgetId) {
   `);
 
   const items = budget?.items || [{ description: '', qty: 1, unitPrice: 0, aprobado: false }];
+  const clients = DB.getAll('clients');
+  const selectedClientName = budget?.clientName || '';
+  const hasSelectedClient = selectedClientName && !clients.some(c => c.name === selectedClientName);
+  const clientOptions = clients.map(c => `<option value="${esc(c.name)}" ${selectedClientName === c.name ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
+  const clientSelectOptions = `${clientOptions}${hasSelectedClient ? `<option value="${esc(selectedClientName)}" selected>${esc(selectedClientName)}</option>` : ''}<option value="__new_client__">+ Nuevo cliente</option>`;
   const statusOpts = Object.entries(BUDGET_STATUS).map(([k,v]) =>
     `<option value="${k}" ${(budget?.status||'borrador')===k?'selected':''}>${v.label}</option>`).join('');
 
@@ -822,7 +868,7 @@ function renderBudgetForm(projectId, budgetId) {
       </td>
       <td style="width:80px"><input type="number" min="0" value="${it.qty||1}" oninput="updateLiRow(${i})" id="li-qty-${i}" ${isReadOnly ? 'disabled' : ''}></td>
       <td style="width:130px"><input type="number" min="0" step="0.01" value="${it.unitPrice||0}" oninput="updateLiRow(${i})" id="li-up-${i}" ${isReadOnly ? 'disabled' : ''}></td>
-      <td style="width:150px;text-align:right;padding-right:12px;font-weight:600;color:#374151" id="li-total-${i}">${fmtCurrency((it.qty||1)*(it.unitPrice||0), budget?.administration || adm.code.slice(0, -1))}</td>
+      <td style="width:150px;text-align:right;padding-right:12px;font-weight:600;color:#374151" id="li-total-${i}">${fmtCurrency((it.qty||1)*(it.unitPrice||0), budget?.administration || existingProject?.administration || 'ARG')}</td>
       ${!isReadOnly ? `<td style="width:40px">
         <button onclick="removeLiRow(${i})" class="btn btn-danger btn-icon btn-sm" style="padding:4px">
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
@@ -843,8 +889,13 @@ function renderBudgetForm(projectId, budgetId) {
     </div>
   `).join('') : '<p class="text-sm text-gray-400 text-center py-4">Sin historial</p>';
 
-  const totalAprobado = calcApprovedTotal(items);
-  const total = calcBudgetTotal(items);
+  const administrationKey = (budget?.administration || existingProject?.administration || 'ARG');
+  const currentTaxChecked = document.getElementById('b-iva-con')?.checked ?? (administrationKey === 'PERU' ? true : false);
+  const ivaMode = (administrationKey === 'ARG' || administrationKey === 'PERU')
+    ? ((budget?.iva === 'con' || currentTaxChecked) ? 'con' : 'sin')
+    : 'sin';
+  const totalAprobado = calcApprovedTotal(items, administrationKey, ivaMode);
+  const total = calcBudgetTotal(items, administrationKey, ivaMode);
   const showApprovalCol = budget && budget.status !== 'borrador';
 
   setContent(`
@@ -872,7 +923,10 @@ function renderBudgetForm(projectId, budgetId) {
           </div>
           <div class="form-group mb-0">
             <label class="form-label">Cliente *</label>
-            <input id="b-client" class="form-input" value="${esc(budget?.clientName||'')}" placeholder="Nombre del cliente">
+            <select id="b-client" class="form-select">
+              <option value="">Seleccionar cliente</option>
+              ${clientSelectOptions}
+            </select>
           </div>
           <div class="form-group mb-0">
             <label class="form-label">Administración *</label>
@@ -914,12 +968,12 @@ function renderBudgetForm(projectId, budgetId) {
           </div>
         </div>
         `}
-        <div id="iva-block" class="mt-3" style="${(budget?.administration||'ARG')==='ARG' ? '' : 'display:none'}">
+        <div id="iva-block" class="mt-3" style="${((budget?.administration||'ARG') === 'ARG' || (budget?.administration||'ARG') === 'PERU') ? '' : 'display:none'}">
           <div class="form-group mb-0">
-            <label class="form-label">IVA</label>
+            <label class="form-label">${(budget?.administration||'ARG') === 'PERU' ? 'IGV' : 'IVA'}</label>
             <div style="display:flex;gap:12px;align-items:center">
-              <label class="inline-flex items-center"><input type="checkbox" id="b-iva-con" ${budget?.iva==='con'?'checked':''} onchange="toggleIVA('con')"> <span style="margin-left:8px">+IVA</span></label>
-              <label class="inline-flex items-center"><input type="checkbox" id="b-iva-sin" ${budget?.iva==='sin'?'checked':''} onchange="toggleIVA('sin')"> <span style="margin-left:8px">Sin IVA</span></label>
+              <label class="inline-flex items-center"><input type="checkbox" id="b-iva-con" ${(budget?.iva==='con' || (budget?.administration||'ARG') === 'PERU') ? 'checked' : ''} onchange="toggleIVA('con')"> <span style="margin-left:8px">+${(budget?.administration||'ARG') === 'PERU' ? 'IGV' : 'IVA'}</span></label>
+              <label class="inline-flex items-center"><input type="checkbox" id="b-iva-sin" ${budget?.iva==='sin' ? 'checked' : ''} onchange="toggleIVA('sin')"> <span style="margin-left:8px">Sin ${(budget?.administration||'ARG') === 'PERU' ? 'IGV' : 'IVA'}</span></label>
             </div>
           </div>
         </div>
@@ -971,6 +1025,16 @@ function renderBudgetForm(projectId, budgetId) {
                 <p class="text-lg font-semibold text-yellow-600" id="b-approved-total">${fmtCurrency(totalAprobado, budget?.administration || 'ARG')}</p>
               </div>
             ` : ''}
+            <div id="budget-breakdown" class="mb-3 min-w-[220px] text-sm text-gray-600 ${((administrationKey === 'ARG' || administrationKey === 'PERU') && (budget?.iva === 'con' || document.getElementById('b-iva-con')?.checked)) ? '' : 'hidden'}">
+              <div class="flex justify-between gap-4 mb-1">
+                <span>Subtotal</span>
+                <span id="b-subtotal">${fmtCurrency(calcBudgetBreakdown(items, administrationKey, ivaMode).subtotal, administrationKey)}</span>
+              </div>
+              <div class="flex justify-between gap-4 text-blue-700" style="display:${((administrationKey === 'ARG' || administrationKey === 'PERU') && (budget?.iva === 'con' || document.getElementById('b-iva-con')?.checked)) ? 'flex' : 'none'}">
+                <span>${getTaxLabel(administrationKey, true)}</span>
+                <span id="b-iva-amount">+ ${fmtCurrency(calcBudgetBreakdown(items, administrationKey, ivaMode).iva, administrationKey)}</span>
+              </div>
+            </div>
             <p class="text-xs text-gray-500 mb-1">TOTAL PRESUPUESTO</p>
             <p class="text-2xl font-bold text-gray-900" id="b-total">${fmtCurrency(total, budget?.administration || 'ARG')}</p>
           </div>
@@ -997,11 +1061,32 @@ function renderBudgetForm(projectId, budgetId) {
 
   // Keep track of items in JS
   window._budgetProjectId = projectId;
-  window._budgetAdm = budget?.administration || adm.code.slice(0, -1);
+  window._budgetAdm = budget?.administration || existingProject?.administration || 'ARG';
   window._liItems = items.map(it => ({ ...it }));
   window._budgetIsApproved = false; // Always allow editing
   window._currentBudgetStatus = budget?.status || 'borrador';
   window._budgetHasProject = !!existingProject;
+
+  const clientSelect = document.getElementById('b-client');
+  if (clientSelect) {
+    clientSelect.value = clientSelect.value || (selectedClientName || '');
+    clientSelect.addEventListener('change', (e) => {
+      if (e.target.value === '__new_client__') {
+        showClientModal(null, (newClient) => {
+          const clients = DB.getAll('clients');
+          const current = document.getElementById('b-client');
+          if (!current) return;
+          const options = [`<option value="">Seleccionar cliente</option>`]
+            .concat(clients.map(c => `<option value="${esc(c.name)}" ${newClient && c.name === newClient.name ? 'selected' : ''}>${esc(c.name)}</option>`))
+            .concat(['<option value="__new_client__">+ Nuevo cliente</option>'])
+            .join('');
+          current.innerHTML = options;
+          if (newClient) current.value = newClient.name;
+        });
+        e.target.value = selectedClientName || '';
+      }
+    });
+  }
 
   // Update administration badge when select changes
   const adminSelect = document.getElementById('b-admin');
@@ -1014,9 +1099,31 @@ function renderBudgetForm(projectId, budgetId) {
         badge.innerHTML = `${selectedAdm.flag} ${selectedAdm.label} · ${selectedAdm.code}`;
         badge.style.color = selectedAdm.flagColor;
       }
-      // Show/hide IVA block for ARG administration
       const ivaBlock = document.getElementById('iva-block');
-      if (ivaBlock) ivaBlock.style.display = (e.target.value === 'ARG') ? '' : 'none';
+      const taxSupported = e.target.value === 'ARG' || e.target.value === 'PERU';
+      if (ivaBlock) ivaBlock.style.display = taxSupported ? '' : 'none';
+
+      const label = document.querySelector('#iva-block .form-label');
+      const ivaText = document.querySelector('#iva-block #b-iva-con + span');
+      const sinText = document.querySelector('#iva-block #b-iva-sin + span');
+      const isPeru = e.target.value === 'PERU';
+      if (label) label.textContent = isPeru ? 'IGV' : 'IVA';
+      if (ivaText) ivaText.textContent = isPeru ? '+IGV' : '+IVA';
+      if (sinText) sinText.textContent = isPeru ? 'Sin IGV' : 'Sin IVA';
+      syncBudgetTaxLabel(e.target.value);
+
+      if (e.target.value !== 'ARG' && e.target.value !== 'PERU') {
+        const con = document.getElementById('b-iva-con');
+        const sin = document.getElementById('b-iva-sin');
+        if (con) con.checked = false;
+        if (sin) sin.checked = false;
+      } else {
+        const con = document.getElementById('b-iva-con');
+        const sin = document.getElementById('b-iva-sin');
+        if (con) con.checked = isPeru || e.target.value === 'ARG';
+        if (sin) sin.checked = !con.checked;
+      }
+
       rebuildLiTable();
     });
   }
@@ -1030,14 +1137,35 @@ function renderBudgetForm(projectId, budgetId) {
     });
   }
 
-  // IVA toggle helper (two checkboxes acting exclusive)
+  // IVA toggle helper: Argentina can mark/unmark +IVA or Sin IVA freely.
+  // Important: the checkbox state is already updated by the browser when onchange fires,
+  // so we must not toggle it again or it will instantly reverse the click.
   window.toggleIVA = function(v) {
     const con = document.getElementById('b-iva-con');
     const sin = document.getElementById('b-iva-sin');
     if (!con || !sin) return;
-    if (v === 'con') { con.checked = true; sin.checked = false; }
-    else if (v === 'sin') { con.checked = false; sin.checked = true; }
-    else { con.checked = false; sin.checked = false; }
+
+    const adm = String(window._budgetAdm || '').toUpperCase();
+    const supportsTax = adm === 'ARG' || adm === 'PERU';
+    if (!supportsTax) return;
+
+    if (v === 'con') {
+      con.checked = true;
+      sin.checked = false;
+    } else if (v === 'sin') {
+      con.checked = false;
+      sin.checked = true;
+    }
+
+    const ivaMode = con.checked ? 'con' : 'sin';
+    const total = calcBudgetTotal(window._liItems, window._budgetAdm, ivaMode);
+    const approved = calcApprovedTotal(window._liItems, window._budgetAdm, ivaMode);
+    const target = document.getElementById('b-total');
+    if (target) target.textContent = fmtCurrency(total, window._budgetAdm);
+    const partial = document.getElementById('b-approved-total');
+    if (partial) partial.textContent = fmtCurrency(approved, window._budgetAdm);
+    syncBudgetTaxLabel(String(window._budgetAdm || '').toUpperCase());
+    updateTotals();
   };
 
   window.toggleItemApproval = (i) => {
@@ -1088,29 +1216,62 @@ function renderBudgetForm(projectId, budgetId) {
   };
 
   function updateTotals() {
-    const grand = calcBudgetTotal(window._liItems);
-    const approved = calcApprovedTotal(window._liItems);
+    const adm = String(window._budgetAdm || '').toUpperCase();
+    const conChecked = document.getElementById('b-iva-con')?.checked;
+    const ivaMode = (adm === 'ARG' || adm === 'PERU') ? (conChecked ? 'con' : 'sin') : 'sin';
+    const breakdown = calcBudgetBreakdown(window._liItems, window._budgetAdm, ivaMode);
+    const grand = breakdown.total;
+    const approved = calcApprovedTotal(window._liItems, window._budgetAdm, ivaMode);
     const currentStatus = window._currentBudgetStatus || 'borrador';
     const showApprovalCol = currentStatus !== 'borrador';
+    const shouldShowVat = (adm === 'ARG' || adm === 'PERU') && conChecked;
+    const vatLabel = getTaxLabel(adm, true);
+    syncBudgetTaxLabel(adm);
     
     document.getElementById('b-total').textContent = fmtCurrency(grand, window._budgetAdm);
-    
-    // Update or create the approved total section
+    const subtotalEl = document.getElementById('b-subtotal');
+    const ivaEl = document.getElementById('b-iva-amount');
+    const vatBox = document.getElementById('budget-breakdown');
+    const vatLine = document.querySelector('#budget-breakdown .text-blue-700');
+
+    if (subtotalEl) subtotalEl.textContent = fmtCurrency(breakdown.subtotal, window._budgetAdm);
+    if (ivaEl) ivaEl.textContent = `+ ${fmtCurrency(breakdown.iva, window._budgetAdm)}`;
+    if (vatBox) vatBox.classList.toggle('hidden', !shouldShowVat);
+    if (vatLine) vatLine.style.display = shouldShowVat ? '' : 'none';
+
     const footerRight = document.querySelector('#li-table').closest('div').querySelector('.p-4.border-t .text-right');
     if (footerRight) {
       if (showApprovalCol && approved > 0 && approved < grand) {
-        // Show partial approval total
         footerRight.innerHTML = `
           <div class="mb-2">
             <p class="text-xs text-gray-500">Aprobado parcial</p>
             <p class="text-lg font-semibold text-yellow-600" id="b-approved-total">${fmtCurrency(approved, window._budgetAdm)}</p>
           </div>
+          <div id="budget-breakdown" class="mb-3 min-w-[220px] text-sm text-gray-600 ${shouldShowVat ? '' : 'hidden'}">
+            <div class="flex justify-between gap-4 mb-1">
+              <span>Subtotal</span>
+              <span id="b-subtotal">${fmtCurrency(breakdown.subtotal, window._budgetAdm)}</span>
+            </div>
+            <div class="flex justify-between gap-4 text-blue-700" style="display:${shouldShowVat ? 'flex' : 'none'}">
+              <span>${vatLabel}</span>
+              <span id="b-iva-amount">+ ${fmtCurrency(breakdown.iva, window._budgetAdm)}</span>
+            </div>
+          </div>
           <p class="text-xs text-gray-500 mb-1">TOTAL PRESUPUESTO</p>
           <p class="text-2xl font-bold text-gray-900" id="b-total">${fmtCurrency(grand, window._budgetAdm)}</p>
         `;
       } else {
-        // Show only total
         footerRight.innerHTML = `
+          <div id="budget-breakdown" class="mb-3 min-w-[220px] text-sm text-gray-600 ${shouldShowVat ? '' : 'hidden'}">
+            <div class="flex justify-between gap-4 mb-1">
+              <span>Subtotal</span>
+              <span id="b-subtotal">${fmtCurrency(breakdown.subtotal, window._budgetAdm)}</span>
+            </div>
+            <div class="flex justify-between gap-4 text-blue-700" style="display:${shouldShowVat ? 'flex' : 'none'}">
+              <span>${vatLabel}</span>
+              <span id="b-iva-amount">+ ${fmtCurrency(breakdown.iva, window._budgetAdm)}</span>
+            </div>
+          </div>
           <p class="text-xs text-gray-500 mb-1">TOTAL PRESUPUESTO</p>
           <p class="text-2xl font-bold text-gray-900" id="b-total">${fmtCurrency(grand, window._budgetAdm)}</p>
         `;
@@ -1222,8 +1383,10 @@ window.showApprovalModal = async function(budgetId) {
     return;
   }
   
-  const total = calcBudgetTotal(budget.items || []);
-  const adm = ADMIN[budget.administration || 'ARG'];
+  const budgetAdministration = budget.administration || 'ARG';
+  const budgetIvaMode = budgetAdministration === 'PERU' ? 'con' : (budgetAdministration === 'ARG' && budget.iva === 'con' ? 'con' : 'sin');
+  const total = calcBudgetTotal(budget.items || [], budgetAdministration, budgetIvaMode);
+  const adm = ADMIN[budgetAdministration];
 
   const result = await Swal.fire({
     title: 'Aprobar Presupuesto',
@@ -1302,9 +1465,11 @@ window.showApprovalModal = async function(budgetId) {
     });
 
     // Create new project from budget
-    const approvedAmount = approvalType === 'aprobado-total' ? total : calcApprovedTotal(budget.items);
+    const budgetAdministration = budget.administration || 'ARG';
+    const budgetIvaMode = budgetAdministration === 'PERU' ? 'con' : (budgetAdministration === 'ARG' && budget.iva === 'con' ? 'con' : 'sin');
+    const approvedAmount = approvalType === 'aprobado-total' ? calcBudgetTotal(budget.items, budgetAdministration, budgetIvaMode) : calcApprovedTotal(budget.items, budgetAdministration, budgetIvaMode);
     const projNum = DB.nextNumber('projectCounter');
-    const newProject = DB.add('projects', {
+    const newProject = await DB.add('projects', {
       name: budget.projectName,
       client: budget.clientName,
       administration: budget.administration,
@@ -1321,7 +1486,7 @@ window.showApprovalModal = async function(budgetId) {
       ? `Presupuesto aprobado totalmente - ${bref}` 
       : `Presupuesto aprobado parcialmente - ${bref}`;
     
-    DB.add('incomes', {
+    await DB.add('incomes', {
       projectId: newProject.id,
       budgetId: budgetId,
       date: budget.date || today(),
@@ -1330,12 +1495,23 @@ window.showApprovalModal = async function(budgetId) {
     });
 
     // Link budget to project
-    DB.update('budgets', budgetId, { 
+    await DB.update('budgets', budgetId, { 
       status: approvalType,
       items: budget.items,
       history,
       projectId: newProject.id
     });
+
+    let invoiceCreated = null;
+    if (budget.administration === 'USA') {
+      invoiceCreated = await createInvoiceFromBudget(budgetId);
+    }
+
+    if (invoiceCreated) {
+      notify('Presupuesto aprobado y factura creada', 'success');
+      navigate(`#/projects/${newProject.id}/invoices/${invoiceCreated.id}`);
+      return;
+    }
 
     notify('Presupuesto aprobado y proyecto creado', 'success');
     navigate('#/projects/' + newProject.id);
@@ -1343,34 +1519,47 @@ window.showApprovalModal = async function(budgetId) {
 };
 
 // Create invoice from an approved budget
-window.createInvoiceFromBudget = function(budgetId) {
+window.createInvoiceFromBudget = async function(budgetId) {
   const budget = DB.get('budgets', budgetId);
-  if (!budget) { notify('Presupuesto no encontrado', 'warning'); return; }
+  if (!budget) { notify('Presupuesto no encontrado', 'warning'); return null; }
+
+  const invoiceAlreadyExists = (DB.getAll('invoices') || []).find(inv => inv.budgetId === budgetId);
+  if (invoiceAlreadyExists) {
+    return invoiceAlreadyExists;
+  }
+
+  const allowedAdministration = budget.administration || (budget.projectId ? DB.get('projects', budget.projectId)?.administration : '');
+  if (!canGenerateInvoicesForProject(allowedAdministration)) {
+    notify('Solo la administración United States puede generar facturas.', 'error');
+    return null;
+  }
+
   if (!['aprobado-total','aprobado-parcial'].includes(budget.status)) {
-    if (!confirm('El presupuesto no está marcado como aprobado. Deseas crear igualmente la factura?')) return;
+    if (!confirm('El presupuesto no está marcado como aprobado. Deseas crear igualmente la factura?')) return null;
   }
 
   // Ensure project exists (create if missing)
   let project = budget.projectId ? DB.get('projects', budget.projectId) : null;
   if (!project) {
     const projNum = DB.nextNumber('projectCounter');
-    project = DB.add('projects', {
+    project = await DB.add('projects', {
       name: budget.projectName || `Proyecto desde ${formatBudgetRef(budget.number ?? budget.budgetNumber ?? '')}`,
       client: budget.clientName,
-      administration: budget.administration,
+      administration: 'USA',
       status: 'aprobado',
       date: today(),
       budgetId: budgetId,
       budgetAmount: calcBudgetTotal(budget.items || []),
       number: projNum
     });
-    DB.update('budgets', budgetId, { projectId: project.id });
+    await DB.update('budgets', budgetId, { projectId: project.id });
   }
 
   // Build invoice data from budget
   const items = (budget.items || []).map(it => ({ description: it.description, qty: it.qty, unitPrice: it.unitPrice }));
   const num = DB.nextNumber('invoiceCounter');
-  const inv = DB.add('invoices', {
+  const inv = await DB.add('invoices', {
+    budgetId: budgetId,
     projectId: project.id,
     clientName: budget.clientName,
     date: today(),
@@ -1384,6 +1573,7 @@ window.createInvoiceFromBudget = function(budgetId) {
 
   notify('Factura creada desde presupuesto', 'success');
   navigate(`#/projects/${project.id}/invoices/${inv.id}`);
+  return inv;
 };
 
 /**
@@ -1403,11 +1593,13 @@ window.saveBudgetForm = async function(projectId, budgetId) {
   const status = document.getElementById('b-status')?.value || 'borrador';
   const notes = document.getElementById('b-notes')?.value || '';
   const items = (window._liItems || []).filter(it => it.description || it.unitPrice);
-  const total = calcBudgetTotal(items);
+  const administration = document.getElementById('b-admin')?.value || (budgetId ? DB.get('budgets', budgetId)?.administration : 'ARG') || 'ARG';
+  const ivaMode = administration === 'PERU' ? 'con' : (administration === 'ARG' && document.getElementById('b-iva-con')?.checked ? 'con' : 'sin');
+  const total = calcBudgetTotal(items, administration, ivaMode);
 
   if (!items.length) { notify('Agregá al menos un ítem', 'warning'); return; }
 
-  let data = { date, status, notes, items, total };
+  let data = { date, status, notes, items, total, administration };
 
   // Check if this budget has an associated project (either from parameter or previously approved)
   const hasAssociatedProject = !!projectId || window._budgetHasProject;
@@ -1424,6 +1616,7 @@ window.saveBudgetForm = async function(projectId, budgetId) {
     data.projectName = projectName;
     data.clientName = clientName;
     data.administration = administration;
+    data.total = calcBudgetTotal(items, administration, ivaMode);
   } else if (projectId) {
     data.projectId = projectId;
   }
@@ -1463,7 +1656,8 @@ window.saveBudgetForm = async function(projectId, budgetId) {
     // Capture IVA selection (ARG only UI shows it)
     const ivaCon = document.getElementById('b-iva-con');
     const ivaSin = document.getElementById('b-iva-sin');
-    if (ivaCon?.checked) data.iva = 'con';
+    if (administration === 'PERU') data.iva = 'con';
+    else if (ivaCon?.checked) data.iva = 'con';
     else if (ivaSin?.checked) data.iva = 'sin';
     else data.iva = undefined;
     DB.update('budgets', budgetId, data);
@@ -1482,7 +1676,8 @@ window.saveBudgetForm = async function(projectId, budgetId) {
     // Capture IVA selection for newly created budgets
     const ivaConNew = document.getElementById('b-iva-con');
     const ivaSinNew = document.getElementById('b-iva-sin');
-    if (ivaConNew?.checked) data.iva = 'con';
+    if (administration === 'PERU') data.iva = 'con';
+    else if (ivaConNew?.checked) data.iva = 'con';
     else if (ivaSinNew?.checked) data.iva = 'sin';
     else data.iva = undefined;
     const newBudget = DB.add('budgets', data);
@@ -1491,7 +1686,7 @@ window.saveBudgetForm = async function(projectId, budgetId) {
   }
 };
 
-window.approveBudget = function(budgetId, projectId) {
+window.approveBudget = async function(budgetId, projectId) {
   const budget = DB.get('budgets', budgetId);
   if (!budget) return;
 
@@ -1504,7 +1699,7 @@ window.approveBudget = function(budgetId, projectId) {
       return;
     }
     const projNum = DB.nextNumber('projectCounter');
-    project = DB.add('projects', {
+    project = await DB.add('projects', {
       name: budget.projectName || `Proyecto desde ${formatBudgetRef(budget.number ?? budget.budgetNumber ?? '')}`,
       client: budget.clientName,
       administration: budget.administration,
@@ -1521,22 +1716,22 @@ window.approveBudget = function(budgetId, projectId) {
   const history = budget.history || [];
   history.push({ action: 'Presupuesto aprobado y convertido a proyecto', date: today(), time: now.toLocaleTimeString('es-AR'), notes: '' });
 
-  DB.update('budgets', budgetId, { status: 'aprobado-total', projectId: project.id, history, items: budget.items });
+  await DB.update('budgets', budgetId, { status: 'aprobado-total', projectId: project.id, history, items: budget.items });
 
   // Auto-income: only if not already recorded
   const existing = DB.getIncomesByProject(project.id).find(i => i.budgetId === budgetId);
   if (!existing) {
-    DB.add('incomes', {
+    await DB.add('incomes', {
       projectId: project.id,
       budgetId,
       date: budget.date || today(),
       description: `Presupuesto aprobado ${formatBudgetRef(budget.number ?? budget.budgetNumber ?? '')}`,
-      amount: calcBudgetTotal(budget.items || []),
+      amount: calcBudgetTotal(budget.items || [], budget.administration || 'ARG', budget.administration === 'ARG' && budget.iva === 'con' ? 'con' : 'sin', budget.administration || 'ARG', budget.administration === 'ARG' && budget.iva === 'con' ? 'con' : 'sin'),
     });
   }
 
   // Crear factura automáticamente a partir del presupuesto aprobado
-  try { createInvoiceFromBudget(budgetId); } catch (e) { console.error('No se pudo crear factura automática:', e); }
+  try { await createInvoiceFromBudget(budgetId); } catch (e) { console.error('No se pudo crear factura automática:', e); }
 
   // Update UI and navigate
   if (document.getElementById('b-status')) document.getElementById('b-status').value = 'aprobado-total';
@@ -1746,10 +1941,38 @@ async function deleteIncome(id, projectId) {
   renderProjectDetail(projectId, 'operations');
 }
 
+function ensureInvoicesFromApprovedBudgets(project) {
+  if (!project || project.administration !== 'USA') return;
+
+  const allInvoices = DB.getAll('invoices') || [];
+  const approvedBudgets = (DB.getBudgetsByProject(project.id) || []).filter(b =>
+    ['aprobado-total', 'aprobado-parcial'].includes(b.status) &&
+    !allInvoices.some(inv => inv.projectId === project.id && inv.budgetId === b.id)
+  );
+
+  approvedBudgets.forEach(budget => {
+    const items = (budget.items || []).map(it => ({ description: it.description, qty: it.qty, unitPrice: it.unitPrice }));
+    const num = DB.nextNumber('invoiceCounter');
+    DB.add('invoices', {
+      budgetId: budget.id,
+      projectId: project.id,
+      clientName: budget.clientName || project.client || '',
+      date: budget.date || today(),
+      dueDate: '',
+      status: 'pendiente',
+      notes: budget.notes || '',
+      items,
+      total: calcBudgetTotal(items),
+      number: num
+    });
+  });
+}
+
 // ═══════════════════════════════════════════════════════════════
 // FACTURACIÓN (tab — solo USA)
 // ═══════════════════════════════════════════════════════════════
 function renderTabInvoices(project) {
+  ensureInvoicesFromApprovedBudgets(project);
   const invoices = DB.getInvoicesByProject(project.id).sort((a,b) => (a.number||0) - (b.number||0));
   const rows = invoices.length ? invoices.map(inv => {
     const total = calcBudgetTotal(inv.items || []);
@@ -1761,6 +1984,9 @@ function renderTabInvoices(project) {
       <td>
         <div class="flex gap-2">
           <button class="btn btn-secondary btn-sm" onclick="navigate('#/projects/${project.id}/invoices/${inv.id}')">Ver / Editar</button>
+          <button class="btn btn-secondary btn-sm btn-icon" onclick="previewInvoicePDF('${inv.id}')" title="Vista previa">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.036 12.322a1.012 1.012 0 010-.644C3.423 7.388 7.363 4 12 4s8.577 3.388 9.964 7.678a1.012 1.012 0 010 .644C20.577 16.612 16.637 20 12 20s-8.577-3.388-9.964-7.678z"/><circle cx="12" cy="12" r="3.5"/></svg>
+          </button>
           <button class="btn btn-secondary btn-sm btn-icon" onclick="exportInvoicePDF('${inv.id}')" title="PDF">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
           </button>
@@ -1791,6 +2017,18 @@ function renderTabInvoices(project) {
 function renderInvoiceForm(projectId, invoiceId) {
   const project = DB.get('projects', projectId);
   if (!project) return navigate('#/projects');
+  if (!canGenerateInvoicesForProject(project)) {
+    setBreadcrumb([{ label: 'Proyectos', route: '#/projects' }, { label: project.name }]);
+    setActions(`<button class="btn btn-secondary btn-sm" onclick="navigate('#/projects')">← Volver</button>`);
+    setContent(`
+      <div class="max-w-xl mx-auto bg-white border border-gray-200 rounded-2xl p-8 text-center">
+        <div class="text-4xl mb-3">🚫</div>
+        <h2 class="text-xl font-bold text-gray-900 mb-2">Factura no disponible</h2>
+        <p class="text-gray-600">Solo la administración United States puede generar facturas.</p>
+      </div>
+    `);
+    return;
+  }
   const inv = invoiceId ? DB.get('invoices', invoiceId) : null;
   const num = inv?.number ?? inv?.invoiceNumber ?? '(nueva)';
   const cfg = DB.getConfig() || {};
@@ -1802,6 +2040,7 @@ function renderInvoiceForm(projectId, invoiceId) {
   ]);
   setActions(`
     <button class="btn btn-secondary btn-sm" onclick="navigate('#/projects/${projectId}/invoices')">← Volver</button>
+    ${inv ? `<button class="btn btn-secondary btn-sm" onclick="previewInvoicePDF('${invoiceId}')">👁️ Vista previa</button>` : ''}
     ${inv ? `<button class="btn btn-secondary btn-sm" onclick="exportInvoicePDF('${invoiceId}')">📄 PDF</button>` : ''}
     <button class="btn btn-primary btn-sm" onclick="saveInvoiceForm('${projectId}','${invoiceId||''}')">💾 Guardar</button>
   `);
@@ -1944,6 +2183,10 @@ function renderInvoiceForm(projectId, invoiceId) {
 
 window.saveInvoiceForm = function(projectId, invoiceId) {
   const project = DB.get('projects', projectId);
+  if (!project || !canGenerateInvoicesForProject(project)) {
+    notify('Solo la administración United States puede generar facturas.', 'error');
+    return;
+  }
   const items = (window._invItems || []).filter(it => it.description || it.unitPrice);
   if (!items.length) { notify('Agregá al menos un ítem', 'warning'); return; }
   const data = {
@@ -2086,7 +2329,12 @@ function renderAllInvoices() {
   setBreadcrumb([{ label: 'Facturas' }]);
   setActions('');
 
-  const invoices = DB.getAll('invoices').sort((a,b) => b.createdAt > a.createdAt ? 1:-1);
+  const invoices = DB.getAll('invoices')
+    .filter(inv => {
+      const project = DB.get('projects', inv.projectId);
+      return project && project.administration === 'USA';
+    })
+    .sort((a,b) => b.createdAt > a.createdAt ? 1:-1);
   const projects = DB.getAll('projects');
   const pMap = Object.fromEntries(projects.map(p => [p.id, p]));
 
@@ -2151,6 +2399,7 @@ function renderAdministraciones() {
   const pendingProjects = allProjects.filter(p => p.status === 'pendiente');
   const approvedProjects = allProjects.filter(p => p.status === 'aprobado');
   const totalProjects = allProjects.length;
+  const approvedAmount = approvedProjects.reduce((sum, project) => sum + (Number(project.budgetAmount) || 0), 0);
     
     // Calculate earnings (only incomes, not expenses)
     const operations = DB.getAll('operations').filter(o => o.administration === key);
@@ -2170,16 +2419,17 @@ function renderAdministraciones() {
         <!-- Boxes de proyectos -->
         <div class="grid grid-cols-3 gap-3 mb-5">
           <div class="admin-stat-box text-center p-3 rounded-xl w-full min-w-0 overflow-visible" style="background: #F9F9F9; border: 2px solid #E7E7E7; min-height: 96px; display:flex; flex-direction:column; justify-content:center; align-items:center; min-width: 0; width: 100%;">
-            <p class="text-[8px] md:text-[9.5px] font-bold text-gray-500 uppercase mb-1 leading-none px-1 text-center" style="white-space: nowrap; letter-spacing: 0.08em;">Pendientes</p>
-            <p class="admin-stat-value text-2xl font-bold leading-none break-all text-center" style="color: ${a.flagColor}">${pendingProjects.length}</p>
+            <p class="text-[8px] md:text-[9.5px] font-bold text-gray-500 uppercase mb-1 leading-none px-1 text-center" style="display:flex; align-items:center; justify-content:center; text-align:center; line-height:1.1; letter-spacing:0.08em; white-space:normal; max-width:100%;">Pendientes</p>
+            <p class="admin-stat-value text-2xl font-bold leading-none break-all text-center" style="color: ${a.flagColor}; display:block; text-align:center;">${pendingProjects.length}</p>
           </div>
           <div class="admin-stat-box text-center p-3 rounded-xl w-full min-w-0 overflow-visible" style="background: #F9F9F9; border: 2px solid #E7E7E7; min-height: 96px; display:flex; flex-direction:column; justify-content:center; align-items:center; min-width: 0; width: 100%;">
-            <p class="text-[8px] md:text-[9.5px] font-bold text-gray-500 uppercase mb-1 leading-none px-1 text-center" style="white-space: nowrap; letter-spacing: 0.08em;">Aprobados</p>
-            <p class="admin-stat-value text-2xl font-bold leading-none break-all text-center" style="color: ${a.flagColor}">${approvedProjects.length}</p>
+            <p class="text-[8px] md:text-[9.5px] font-bold text-gray-500 uppercase mb-1 leading-none px-1 text-center" style="display:flex; align-items:center; justify-content:center; text-align:center; line-height:1.1; letter-spacing:0.08em; white-space:normal; max-width:100%;">Aprobados</p>
+            <p class="admin-stat-value text-2xl font-bold leading-none break-all text-center" style="color: ${a.flagColor}; display:block; text-align:center;">${approvedProjects.length}</p>
+            <p class="text-[9px] font-semibold text-gray-500 mt-1 text-center" style="white-space:normal; line-height:1.2;">${fmtCurrency(approvedAmount, key)}</p>
           </div>
           <div class="admin-stat-box text-center p-3 rounded-xl w-full min-w-0 overflow-visible" style="background: ${a.flagColor}15; border: 2px solid ${a.flagColor}; min-height: 96px; display:flex; flex-direction:column; justify-content:center; align-items:center; min-width: 0; width: 100%;">
-            <p class="text-[8px] md:text-[9.5px] font-bold uppercase mb-1 leading-none px-1 text-center" style="color: ${a.flagColor}; white-space: nowrap; letter-spacing: 0.08em;">Totales</p>
-            <p class="admin-stat-value text-2xl font-bold leading-none break-all text-center" style="color: ${a.flagColor}">${totalProjects}</p>
+            <p class="text-[8px] md:text-[9.5px] font-bold uppercase mb-1 leading-none px-1 text-center" style="color: ${a.flagColor}; display:flex; align-items:center; justify-content:center; text-align:center; line-height:1.1; letter-spacing:0.08em; white-space:normal; max-width:100%;">Totales</p>
+            <p class="admin-stat-value text-2xl font-bold leading-none break-all text-center" style="color: ${a.flagColor}; display:block; text-align:center;">${totalProjects}</p>
           </div>
         </div>
         
@@ -2265,6 +2515,7 @@ function renderSettings(section = 'company') {
 
   const sections = [
     { key: 'company',    label: 'Empresa' },
+    { key: 'security',   label: 'Seguridad' },
     { key: 'clients',    label: 'Clientes' },
     { key: 'categories', label: 'Categorias de Gastos' },
     { key: 'demo',       label: '📦 Datos de Ejemplo' },
@@ -2278,12 +2529,89 @@ function renderSettings(section = 'company') {
 
   let body = '';
   if (section === 'company') body = renderCompanySettings();
+  if (section === 'security') body = renderSecuritySettings();
   if (section === 'clients') body = renderClientSettings();
   if (section === 'categories') body = renderCategorySettings();
   if (section === 'demo') body = renderDemoDataSettings();
 
   setContent(`<div class="max-w-3xl mx-auto">${tabs}${body}</div>`);
 }
+
+function renderSecuritySettings() {
+  const currentUserEmail = Auth.getCurrentUser()?.email || 'demo@aurea.local';
+  const modeText = window.isDemoMode
+    ? 'Modo local: el cambio se guarda únicamente en este navegador.'
+    : 'Modo producción: el cambio se guarda en Firebase Authentication.';
+
+  return `
+    <div class="bg-white border border-gray-200 rounded-2xl p-6 shadow-sm" style="max-width: 980px; margin: 0 auto;">
+      <div class="mb-6">
+        <h3 class="text-2xl font-semibold text-gray-900 mb-2">Seguridad de la cuenta</h3>
+        <p class="text-base text-gray-600">Cambiá la contraseña/PIN utilizado para ingresar a Aurea.</p>
+      </div>
+
+      <div class="rounded-2xl border border-gray-200 bg-gray-50 p-4 mb-8">
+        <div class="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">CUENTA</div>
+        <div class="text-xl font-semibold text-gray-900">${esc(currentUserEmail)}</div>
+        <div class="mt-2 text-sm text-gray-500">${modeText}</div>
+      </div>
+
+      <div class="space-y-5">
+        <div>
+          <label class="block text-base font-semibold text-gray-800 mb-2">Contraseña / PIN actual</label>
+          <input id="security-current-pin" type="password" inputmode="numeric" maxlength="6" class="form-input" placeholder="••••" style="height: 46px; font-size: 16px;">
+        </div>
+
+        <div>
+          <label class="block text-base font-semibold text-gray-800 mb-2">Nueva contraseña / PIN</label>
+          <input id="security-new-pin" type="password" inputmode="numeric" maxlength="6" class="form-input" placeholder="4 a 6 dígitos" style="height: 46px; font-size: 16px;">
+        </div>
+
+        <div>
+          <label class="block text-base font-semibold text-gray-800 mb-2">Confirmar nueva contraseña / PIN</label>
+          <input id="security-confirm-pin" type="password" inputmode="numeric" maxlength="6" class="form-input" placeholder="Repetir nuevo PIN" style="height: 46px; font-size: 16px;">
+        </div>
+
+        <button class="btn btn-primary mt-4" style="padding: 14px 22px; border-radius: 12px; font-size: 18px; width: 100%; justify-content: center;" onclick="saveSecurityPin()">Cambiar contraseña</button>
+      </div>
+
+      <div class="mt-8 pt-5 border-t border-gray-200 text-sm text-gray-500 leading-relaxed">
+        Aurea no guarda la contraseña en texto plano. En producción la credencial se administra mediante Firebase Authentication.
+      </div>
+    </div>
+  `;
+}
+
+window.saveSecurityPin = async function() {
+  const current = document.getElementById('security-current-pin')?.value.trim() || '';
+  const next = document.getElementById('security-new-pin')?.value.trim() || '';
+  const confirm = document.getElementById('security-confirm-pin')?.value.trim() || '';
+
+  if (!current) {
+    notify('Ingresá tu PIN actual', 'warning');
+    return;
+  }
+
+  if (!next || next.length < 4 || next.length > 6 || !/^\d+$/.test(next)) {
+    notify('El nuevo PIN debe tener entre 4 y 6 dígitos numéricos', 'warning');
+    return;
+  }
+
+  if (next !== confirm) {
+    notify('Los PINs nuevos no coinciden', 'warning');
+    return;
+  }
+
+  try {
+    await Auth.changePIN(next, current);
+    notify('PIN actualizado correctamente', 'success');
+    document.getElementById('security-current-pin').value = '';
+    document.getElementById('security-new-pin').value = '';
+    document.getElementById('security-confirm-pin').value = '';
+  } catch (error) {
+    notify(error.message || 'No se pudo cambiar el PIN', 'error');
+  }
+};
 
 function renderCompanySettings() {
   const cfg = DB.getConfig() || {};
@@ -2310,7 +2638,9 @@ function renderCompanySettings() {
           ['company-tagline','Tagline / Descripción','text',c.tagline||''],
           ['company-email','Email','email',c.email||''],
           ['company-phone','Teléfono','tel',c.phone||''],
-          ['company-address','Dirección','text',c.address||''],
+          ['company-address','Dirección', 'text', c.address || ''],
+          ['company-address-2','Dirección (línea 2)','text', c.address2 || ''],
+          ['company-city','Ciudad / Localidad','text',c.city||''],
           ['company-taxid','CUIT / Tax ID','text',c.taxId||''],
         ].map(([id,label,type,val]) => `
           <div class="form-group">
@@ -2353,6 +2683,8 @@ window.saveCompanySettings = function() {
     email: document.getElementById('company-email')?.value.trim() || '',
     phone: document.getElementById('company-phone')?.value.trim() || '',
     address: document.getElementById('company-address')?.value.trim() || '',
+    address2: document.getElementById('company-address-2')?.value.trim() || '',
+    city: document.getElementById('company-city')?.value.trim() || '',
     taxId: document.getElementById('company-taxid')?.value.trim() || '',
   };
   DB.setConfig(cfg);
@@ -2364,8 +2696,9 @@ function renderClientSettings() {
   const rows = clients.length ? clients.map(c => `
     <tr>
       <td class="font-medium text-gray-900">${esc(c.name)}</td>
-      <td class="text-gray-500">${esc(c.email||'—')}</td>
-      <td class="text-gray-500">${esc(c.phone||'—')}</td>
+      <td class="text-gray-700">${esc(c.contactName || '—')}</td>
+      <td class="text-gray-500">${esc(c.email || '—')}</td>
+      <td class="text-gray-500">${esc(c.phone || '—')}</td>
       <td>
         <div class="flex gap-2">
           <button class="btn btn-secondary btn-sm btn-icon" onclick="showClientModal('${c.id}')">
@@ -2377,7 +2710,7 @@ function renderClientSettings() {
         </div>
       </td>
     </tr>
-  `).join('') : `<tr><td colspan="4" class="py-8 text-center text-gray-400">Sin clientes</td></tr>`;
+  `).join('') : `<tr><td colspan="5" class="py-8 text-center text-gray-400">Sin clientes</td></tr>`;
 
   return `
     <div class="table-wrap">
@@ -2386,20 +2719,21 @@ function renderClientSettings() {
         <button class="btn btn-primary btn-sm" onclick="showClientModal(null)">+ Nuevo cliente</button>
       </div>
       <table class="data-table">
-        <thead><tr><th>Nombre</th><th>Email</th><th>Teléfono</th><th style="width:80px"></th></tr></thead>
+        <thead><tr><th>Nombre</th><th>Contacto</th><th>Email</th><th>Teléfono</th><th style="width:80px"></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
   `;
 }
 
-window.showClientModal = function(id) {
+window.showClientModal = function(id, callback) {
   const c = id ? DB.get('clients', id) : null;
   Swal.fire({
     title: c ? 'Editar Cliente' : 'Nuevo Cliente',
     html: `
       <div style="text-align:left">
         <div class="form-group"><label class="form-label">Nombre *</label><input id="cl-name" class="form-input" value="${esc(c?.name||'')}"></div>
+        <div class="form-group"><label class="form-label">Nombre de contacto</label><input id="cl-contact" class="form-input" value="${esc(c?.contactName||'')}"></div>
         <div class="form-group"><label class="form-label">Email</label><input id="cl-email" type="email" class="form-input" value="${esc(c?.email||'')}"></div>
         <div class="form-group"><label class="form-label">Teléfono</label><input id="cl-phone" class="form-input" value="${esc(c?.phone||'')}"></div>
         <div><label class="form-label">Dirección</label><input id="cl-address" class="form-input" value="${esc(c?.address||'')}"></div>
@@ -2409,12 +2743,26 @@ window.showClientModal = function(id) {
     preConfirm: () => {
       const name = document.getElementById('cl-name').value.trim();
       if (!name) { Swal.showValidationMessage('El nombre es obligatorio'); return false; }
-      return { name, email: document.getElementById('cl-email').value, phone: document.getElementById('cl-phone').value, address: document.getElementById('cl-address').value };
+      return {
+        name,
+        contactName: document.getElementById('cl-contact').value.trim(),
+        email: document.getElementById('cl-email').value,
+        phone: document.getElementById('cl-phone').value,
+        address: document.getElementById('cl-address').value,
+      };
     }
   }).then(r => {
     if (!r.isConfirmed) return;
-    if (id) { DB.update('clients', id, r.value); notify('Cliente actualizado'); }
-    else { DB.add('clients', r.value); notify('Cliente creado'); }
+    let savedClient = null;
+    if (id) {
+      DB.update('clients', id, r.value);
+      notify('Cliente actualizado');
+      savedClient = { ...r.value, id };
+    } else {
+      savedClient = DB.add('clients', r.value);
+      notify('Cliente creado');
+    }
+    if (typeof callback === 'function') callback(savedClient);
     renderSettings('clients');
   });
 };
@@ -2680,6 +3028,7 @@ window.buildBudgetHtmlFragment = function(budget) {
           <h1 style="font-size:28px;font-weight:800;color:${adm.flagColor};margin:0">${esc(comp.name||'Aurea Technical Art')}</h1>
           ${comp.tagline ? `<p style="color:#374151;font-size:13px;margin:6px 0;font-weight:600">${esc(comp.tagline)}</p>` : ''}
           ${comp.address ? `<p style="color:#64748b;font-size:12px;margin-top:6px">${esc(comp.address)}</p>` : ''}
+          ${comp.address2 ? `<p style="color:#64748b;font-size:12px;margin:2px 0">${esc(comp.address2)}</p>` : ''}
           ${comp.city ? `<p style="color:#64748b;font-size:12px;margin:2px 0">${esc(comp.city)}</p>` : ''}
           ${comp.email ? `<p style="color:#64748b;font-size:12px;margin:2px 0">${esc(comp.email)}</p>` : ''}
           ${comp.phone ? `<p style="color:#64748b;font-size:12px;margin:2px 0">${esc(comp.phone)}</p>` : ''}
@@ -2846,34 +3195,35 @@ window.exportBudgetPDF = function(budgetId) {
 // ═══════════════════════════════════════════════════════════════
 // PDF — FACTURA / INVOICE
 // ═══════════════════════════════════════════════════════════════
-window.exportInvoicePDF = function(invoiceId) {
+function buildInvoiceHtmlFragment(invoiceId) {
   const inv = DB.get('invoices', invoiceId);
-  if (!inv) { notify('Factura no encontrada', 'error'); return; }
+  if (!inv) return '';
+
   const project = DB.get('projects', inv.projectId);
+  if (!project || !canGenerateInvoicesForProject(project)) {
+    return '';
+  }
+
   const cfg = DB.getConfig() || {};
   const comp = cfg.company || {};
   const total = calcBudgetTotal(inv.items || []);
-
-  const adm = ADMIN[project?.administration || 'USA'] || ADMIN.USA;
-  
-  // Translations based on administration
-  const isEnglish = project?.administration === 'USA';
+  const pdfBrandColor = '#de591f';
+  const adm = ADMIN.USA;
   const t = {
-    title: isEnglish ? 'INVOICE' : 'FACTURA',
-    date: isEnglish ? 'Date' : 'Fecha',
-    due: isEnglish ? 'Due' : 'Vencimiento',
-    billTo: isEnglish ? 'Bill To' : 'Facturar a',
-    project: isEnglish ? 'Project' : 'Proyecto',
-    description: isEnglish ? 'Description' : 'Descripción',
-    qty: isEnglish ? 'Qty' : 'Cant.',
-    unitPrice: isEnglish ? 'Unit Price' : 'P. Unitario',
-    amount: isEnglish ? 'Amount' : 'Importe',
-    totalDue: isEnglish ? 'TOTAL DUE' : 'TOTAL A PAGAR',
-    notes: isEnglish ? 'Notes / Payment Terms' : 'Notas / Condiciones de Pago',
-    generated: isEnglish ? 'Generated' : 'Generado el',
+    title: 'INVOICE',
+    date: 'Date',
+    due: 'Due',
+    billTo: 'Bill To',
+    project: 'Project',
+    description: 'Description',
+    qty: 'Qty',
+    unitPrice: 'Unit Price',
+    amount: 'Amount',
+    totalDue: 'TOTAL DUE',
+    notes: 'Notes / Payment Terms',
+    generated: 'Generated',
   };
-  
-  // Determine invoice display number (format yymmdd#NNN when applicable)
+
   const invRaw = inv.number ?? inv.invoiceNumber ?? '';
   let invDisplay;
   if (typeof invRaw === 'number') {
@@ -2885,14 +3235,15 @@ window.exportInvoicePDF = function(invoiceId) {
     invDisplay = formatBudgetRef(s) || '(sin número)';
   }
 
-  const html = `
+  return `
     <div style="font-family:'Inter',Arial,sans-serif;max-width:720px;margin:0 auto;padding:40px;color:#1e293b">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid ${adm.flagColor};padding-bottom:20px;margin-bottom:30px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid ${pdfBrandColor};padding-bottom:20px;margin-bottom:30px">
         <div style="flex:1">
           ${comp.logo ? `<img src="${comp.logo}" style="max-width:150px;max-height:80px;margin-bottom:12px;object-fit:contain" />` : ''}
-          <h1 style="font-size:28px;font-weight:800;color:${adm.flagColor};margin:0">${esc(comp.name||'Aurea Technical Art')}</h1>
+          <h1 style="font-size:28px;font-weight:800;color:${pdfBrandColor};margin:0">${esc(comp.name||'Aurea Technical Art')}</h1>
           ${comp.tagline ? `<p style="color:#374151;font-size:13px;margin:6px 0;font-weight:600">${esc(comp.tagline)}</p>` : ''}
           ${comp.address ? `<p style="color:#64748b;font-size:12px;margin-top:6px">${esc(comp.address)}</p>` : ''}
+          ${comp.address2 ? `<p style="color:#64748b;font-size:12px;margin:2px 0">${esc(comp.address2)}</p>` : ''}
           ${comp.city ? `<p style="color:#64748b;font-size:12px;margin:2px 0">${esc(comp.city)}</p>` : ''}
           ${comp.email ? `<p style="color:#64748b;font-size:12px;margin:2px 0">${esc(comp.email)}</p>` : ''}
           ${comp.phone ? `<p style="color:#64748b;font-size:12px;margin:2px 0">${esc(comp.phone)}</p>` : ''}
@@ -2900,11 +3251,11 @@ window.exportInvoicePDF = function(invoiceId) {
         </div>
         <div style="text-align:right">
           <h2 style="font-size:20px;font-weight:700;color:#334155;margin:0">${t.title}</h2>
-          <p style="font-size:24px;font-weight:800;color:${adm.flagColor};margin:4px 0">${esc(invDisplay)}</p>
+          <p style="font-size:24px;font-weight:800;color:${pdfBrandColor};margin:4px 0">${esc(invDisplay)}</p>
           <p style="color:#64748b;font-size:13px">${t.date}: ${fmtDate(inv.date)}</p>
           ${inv.dueDate ? `<p style="color:#64748b;font-size:13px">${t.due}: ${fmtDate(inv.dueDate)}</p>` : ''}
           <p style="font-size:12px;color:#64748b;margin:6px 0 0;font-weight:600">
-            <span style="display:inline-block;background:${adm.flagColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:10px;margin-right:6px">${adm.flag}</span>
+            <span style="display:inline-block;background:${pdfBrandColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:10px;margin-right:6px">${adm.flag}</span>
             ${adm.label} · ${adm.code}
           </p>
         </div>
@@ -2923,12 +3274,11 @@ window.exportInvoicePDF = function(invoiceId) {
 
       <table style="width:100%;border-collapse:collapse;margin-bottom:20px">
         <thead>
-          <tr style="background:#f0fdf4">
-            <th style="text-align:left;padding:10px 14px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:${adm.flagColor};border-bottom:2px solid #bbf7d0">${t.description}</th>
-            <th style="text-align:center;width:60px;padding:10px;font-size:11px;text-transform:uppercase;color:${adm.flagColor};border-bottom:2px solid #bbf7d0">${t.qty}</th>
-            
-            <th style="text-align:right;width:120px;padding:10px 14px;font-size:11px;text-transform:uppercase;color:${adm.flagColor};border-bottom:2px solid #bbf7d0">${t.unitPrice}</th>
-            <th style="text-align:right;width:130px;padding:10px 14px;font-size:11px;text-transform:uppercase;color:${adm.flagColor};border-bottom:2px solid #bbf7d0">${t.amount}</th>
+          <tr style="background:#fff7ed">
+            <th style="text-align:left;padding:10px 14px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:${pdfBrandColor};border-bottom:2px solid #fed7aa">${t.description}</th>
+            <th style="text-align:center;width:60px;padding:10px;font-size:11px;text-transform:uppercase;color:${pdfBrandColor};border-bottom:2px solid #fed7aa">${t.qty}</th>
+            <th style="text-align:right;width:120px;padding:10px 14px;font-size:11px;text-transform:uppercase;color:${pdfBrandColor};border-bottom:2px solid #fed7aa">${t.unitPrice}</th>
+            <th style="text-align:right;width:130px;padding:10px 14px;font-size:11px;text-transform:uppercase;color:${pdfBrandColor};border-bottom:2px solid #fed7aa">${t.amount}</th>
           </tr>
         </thead>
         <tbody>
@@ -2936,7 +3286,6 @@ window.exportInvoicePDF = function(invoiceId) {
             <tr style="background:${i%2?'#f8fafc':'#fff'}">
               <td style="padding:10px 14px;font-size:13px;border-bottom:1px solid #f1f5f9">${esc(it.description||'')}</td>
               <td style="text-align:center;padding:10px;font-size:13px;border-bottom:1px solid #f1f5f9">${it.qty||0}</td>
-              
               <td style="text-align:right;padding:10px 14px;font-size:13px;border-bottom:1px solid #f1f5f9">${fmtCurrency(it.unitPrice||0,project?.administration||'USA')}</td>
               <td style="text-align:right;padding:10px 14px;font-size:13px;font-weight:600;border-bottom:1px solid #f1f5f9">${fmtCurrency((it.qty||0)*(it.unitPrice||0),project?.administration||'USA')}</td>
             </tr>
@@ -2945,7 +3294,7 @@ window.exportInvoicePDF = function(invoiceId) {
       </table>
 
       <div style="display:flex;justify-content:flex-end;margin-bottom:24px">
-        <div style="background:${adm.flagColor};border-radius:12px;padding:16px 24px;text-align:right;min-width:200px">
+        <div style="background:${pdfBrandColor};border-radius:12px;padding:16px 24px;text-align:right;min-width:200px">
           <p style="color:rgba(255,255,255,.7);font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin:0 0 4px">${t.totalDue}</p>
           <p style="color:#fff;font-size:26px;font-weight:800;margin:0">${fmtCurrency(total,project?.administration||'USA')}</p>
         </div>
@@ -2958,14 +3307,67 @@ window.exportInvoicePDF = function(invoiceId) {
       </p>
     </div>
   `;
+}
+
+window.previewInvoicePDF = function(invoiceId) {
+  const inv = DB.get('invoices', invoiceId);
+  if (!inv) { notify('Factura no encontrada', 'error'); return; }
+  const project = DB.get('projects', inv.projectId);
+  if (!project || !canGenerateInvoicesForProject(project)) {
+    notify('Solo la administración United States puede generar facturas.', 'error');
+    return;
+  }
+
+  const fragment = buildInvoiceHtmlFragment(invoiceId);
+  if (!fragment) {
+    notify('No se pudo armar la vista previa de la factura.', 'error');
+    return;
+  }
+
+  const invRaw = inv.number ?? inv.invoiceNumber ?? '(sin número)';
+  const displayNumber = formatBudgetRef(String(invRaw)) || '(sin número)';
+  const html = `<!doctype html><html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vista previa — ${esc(displayNumber)}</title></head><body><div style="margin-bottom:12px"><button onclick="(function(){ if(window.opener && typeof window.opener.exportInvoicePDF==='function'){ window.opener.exportInvoicePDF('${invoiceId}'); } else { alert('No se puede exportar desde aquí'); } })()" style="padding:8px 12px;margin-right:8px">Exportar PDF</button><button onclick="window.print()" style="padding:8px 12px">Imprimir</button></div>${fragment}</body></html>`;
+
+  const w = window.open('', '_blank', 'width=900,height=800,scrollbars=yes');
+  if (!w) { notify('El navegador bloqueó la ventana emergente. Permití popups para previsualizar.', 'warning'); return; }
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
+};
+
+window.exportInvoicePDF = function(invoiceId) {
+  const inv = DB.get('invoices', invoiceId);
+  if (!inv) { notify('Factura no encontrada', 'error'); return; }
+  const project = DB.get('projects', inv.projectId);
+  if (!project || !canGenerateInvoicesForProject(project)) {
+    notify('Solo la administración United States puede generar facturas.', 'error');
+    return;
+  }
+
+  const html = buildInvoiceHtmlFragment(invoiceId);
+  if (!html) {
+    notify('No se pudo generar la factura.', 'error');
+    return;
+  }
+
+  const invRaw = inv.number ?? inv.invoiceNumber ?? '';
+  let invDisplay;
+  if (typeof invRaw === 'number') {
+    const s = String(invRaw);
+    if (/^\d{9}$/.test(s)) invDisplay = formatBudgetRef(s);
+    else invDisplay = String(invRaw).padStart(3,'0');
+  } else {
+    const s = String(invRaw || '');
+    invDisplay = formatBudgetRef(s) || '(sin número)';
+  }
 
   const el = document.createElement('div');
   el.innerHTML = html;
   document.body.appendChild(el);
-  
-  const docType = isEnglish ? 'Invoice' : 'Factura';
+
+  const docType = 'Invoice';
   const fileName = `${docType}_${String(invDisplay).replace(/[#\s]/g,'_')}.pdf`;
-  
+
   if (typeof html2pdf !== 'function') {
     document.body.removeChild(el);
     notify('No se encontró la librería html2pdf. Revisa que esté cargada.', 'error');

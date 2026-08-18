@@ -26,7 +26,8 @@ const Auth = (() => {
    * Login en modo DEMO - PIN hardcodeado: 1234
    */
   async function loginWithPINDemo(pin) {
-    if (pin === DEMO_PIN) {
+    const savedPin = localStorage.getItem('aurea_demo_custom_pin') || DEMO_PIN;
+    if (pin === savedPin) {
       // Simular usuario autenticado
       const demoUser = {
         uid: 'demo-user-local',
@@ -38,10 +39,11 @@ const Auth = (() => {
       sessionStorage.setItem('aurea_demo_user', JSON.stringify(demoUser));
       sessionStorage.setItem('aurea_user_email', DEMO_EMAIL);
       
-      console.log('✅ Login DEMO exitoso - PIN: 1234');
+      console.log('✅ Login DEMO exitoso');
       return demoUser;
     } else {
-      throw new Error('PIN incorrecto. PIN de prueba: 1234');
+      const fallbackPin = localStorage.getItem('aurea_demo_custom_pin') ? 'El PIN actual es incorrecto' : 'PIN incorrecto. PIN de prueba: 1234';
+      throw new Error(fallbackPin);
     }
   }
   
@@ -423,8 +425,28 @@ const Auth = (() => {
    * 
    * @param {string} newPIN - Nuevo PIN
    */
-  async function changePIN(newPIN) {
+  async function changePIN(newPIN, currentPIN = null) {
     try {
+      if (window.isDemoMode) {
+        const pinToValidate = currentPIN ?? DEMO_PIN;
+        const storedPin = localStorage.getItem('aurea_demo_custom_pin') || DEMO_PIN;
+        if (String(pinToValidate) !== String(storedPin)) {
+          throw new Error('El PIN actual es incorrecto');
+        }
+
+        if (!newPIN || newPIN.length < 4 || newPIN.length > 6) {
+          throw new Error('El PIN debe tener entre 4 y 6 dígitos');
+        }
+
+        if (!/^\d+$/.test(newPIN)) {
+          throw new Error('El PIN solo puede contener números');
+        }
+
+        localStorage.setItem('aurea_demo_custom_pin', String(newPIN));
+        console.log('✅ PIN demo cambiado exitosamente');
+        return true;
+      }
+
       const user = auth.currentUser;
       
       if (!user) {
@@ -454,6 +476,7 @@ const Auth = (() => {
       });
       
       console.log('✅ PIN cambiado exitosamente');
+      return true;
       
     } catch (error) {
       console.error('❌ Error cambiando PIN:', error);

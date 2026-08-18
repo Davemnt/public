@@ -19,33 +19,36 @@
  */
 
 const firebaseConfig = {
-  apiKey: "DEMO_MODE",  // ← Reemplazá con tu API key para activar Firebase
-  authDomain: "tu-proyecto.firebaseapp.com",
-  projectId: "tu-proyecto",
-  storageBucket: "tu-proyecto.appspot.com",
-  messagingSenderId: "123456789012",
-  appId: "1:123456789012:web:abcdef1234567890"
+  apiKey: "AIzaSyDROFsVQYi-UDEKQJKxakT-2oJZdFpBrTw",
+  authDomain: "aurea-international-management.firebaseapp.com",
+  projectId: "aurea-international-management",
+  storageBucket: "aurea-international-management.firebasestorage.app",
+  messagingSenderId: "708315838479",
+  appId: "1:708315838479:web:f849b84c4458bab5064b7a"
 };
 
-// Detectar si está en modo DEMO o PRODUCCIÓN
-const isDemoMode = firebaseConfig.apiKey === "DEMO_MODE";
+window.firebaseConfig = firebaseConfig;
+
+const isDemoMode = firebaseConfig.apiKey === "DEMO_MODE" || typeof window.firebase === 'undefined';
 
 if (isDemoMode) {
   console.log('🔧 MODO DEMO ACTIVADO - PIN de prueba: 1234');
-  console.log('📝 Para activar Firebase, editá firebase-config.js con tu configuración real');
+  console.log('📝 Firebase no se inicializó porque el SDK no está disponible o está en demo');
 } else {
-  // Inicializar Firebase solo en modo producción
-  firebase.initializeApp(firebaseConfig);
-  
-  // Exportar servicios
-  window.auth = firebase.auth();
-  window.db = firebase.firestore();
-  
-  // Configurar persistencia (mantener sesión)
-  auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL);
-  
-  console.log('🔥 Firebase inicializado correctamente');
+  try {
+    window.firebase.initializeApp(firebaseConfig);
+    window.auth = window.firebase.auth();
+    window.db = window.firebase.firestore();
+
+    if (window.auth && window.auth.setPersistence) {
+      window.auth.setPersistence(window.firebase.auth.Auth.Persistence.LOCAL);
+    }
+
+    console.log('🔥 Firebase inicializado correctamente');
+  } catch (error) {
+    console.error('❌ Error inicializando Firebase:', error);
+    window.isDemoMode = true;
+  }
 }
 
-// Exportar flag de modo demo
 window.isDemoMode = isDemoMode;
