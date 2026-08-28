@@ -1,0 +1,10 @@
+{
+  "name": "Aurea — Gestión de Proyectos",
+  "short_name": "Aurea",
+  "icons": [
+    { "src": "image/favicon.png", "sizes": "180x180 192x192 512x512", "type": "image/png" }
+  ],
+  "theme_color": "#de591f",
+  "background_color": "#ffffff",
+  "display": "standalone"
+}

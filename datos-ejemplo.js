@@ -9,11 +9,29 @@ async function cargarDatosEjemplo() {
   console.log('🔄 Cargando datos de ejemplo...');
   
   try {
+    // Solo permitir cargar datos de ejemplo en modo demo/local
+    if (!window.isDemoMode) {
+      console.error('⛔ Modo producción detectado: la carga de datos de ejemplo está deshabilitada.');
+      console.info('Si querés probar la app localmente, activa el modo demo antes de ejecutar cargarDatosEjemplo().');
+      return;
+    }
     // Verificar que el usuario esté autenticado
     if (!Auth.isAuthenticated()) {
       console.error('❌ Debes estar autenticado para cargar datos');
       return;
     }
+
+    // Marcar automáticamente todos los inserts como datos de muestra (__sample: true)
+    const _originalAdd = DB.add;
+    DB.add = async function(collection, payload) {
+      try {
+        const withSample = Object.assign({}, payload, { __sample: true });
+        return await _originalAdd.call(DB, collection, withSample);
+      } catch (e) {
+        // in case of error, rethrow
+        throw e;
+      }
+    };
     
     // 1. Crear presupuestos de ejemplo
     const presupuesto1 = await DB.add('budgets', {
@@ -322,7 +340,7 @@ async function cargarDatosEjemplo() {
       tax: 0,
       total: 1778700,
       status: 'paid',
-      paidDate: '2026-08-05',
+      cobradoDate: '2026-08-05',
       notes: 'Pago recibido por transferencia bancaria.',
       createdAt: new Date('2026-08-05')
     });
@@ -377,6 +395,8 @@ async function cargarDatosEjemplo() {
         }
       }, 1000);
     }
+    // Restaurar DB.add original
+    DB.add = _originalAdd;
     
   } catch (error) {
     console.error('❌ Error cargando datos de ejemplo:', error);
@@ -386,6 +406,29 @@ async function cargarDatosEjemplo() {
 
 // Hacer la función disponible globalmente
 window.cargarDatosEjemplo = cargarDatosEjemplo;
+
+// Función para eliminar datos de ejemplo (solo en modo demo/local)
+window.eliminarDatosDeMuestra = async function() {
+  if (!window.isDemoMode) {
+    console.error('⛔ Esto solo puede ejecutarse en modo demo/local.');
+    return;
+  }
+  const collections = ['budgets','projects','incomes','expenses','operations','invoices'];
+  for (const col of collections) {
+    try {
+      const items = DB.getAll(col) || [];
+      for (const it of items) {
+        if (it && it.__sample) {
+          await DB.remove(col, it.id);
+          console.log('Eliminado:', col, it.id);
+        }
+      }
+    } catch (e) {
+      console.warn('Error limpiando', col, e);
+    }
+  }
+  console.log('✅ Eliminación de datos de muestra completada. Recargá la página.');
+};
 
 console.log('');
 console.log('📦 Datos de ejemplo disponibles');

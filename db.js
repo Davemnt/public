@@ -118,6 +118,16 @@ const DB = (() => {
   }
 
   // ── Queries helpers (filtros por proyecto) ───────────────────────────
+  // Normalize administration/currency codes used across the app
+  function _normalizeAdm(adm) {
+    const s = String(adm || '').toUpperCase().trim();
+    if (!s) return 'ARG';
+    if (s === 'AR' || s === 'ARG' || s === 'ARS') return 'ARG';
+    if (s === 'PE' || s === 'PERU' || s === 'PEN') return 'PERU';
+    if (s === 'US' || s === 'USA' || s === 'USD') return 'USA';
+    return s;
+  }
+
   
   /**
    * getBudgetsByProject - Obtiene todos los presupuestos de un proyecto
@@ -209,21 +219,37 @@ const DB = (() => {
     // Use incomes and expenses collections to compute financials
     const incomes = _load('incomes').filter(i => i.projectId === projectId);
     const expenses = _load('expenses').filter(e => e.projectId === projectId);
-    const totalIncome = incomes.reduce((s, r) => s + (Number(r.amount || r.monto || 0) || 0), 0);
+    // Determine administration from project to apply correct tax rules
+    const project = _load('projects').find(p => p.id === projectId) || {};
+    const adm = _normalizeAdm(project.administration || project.administracion || project.adm || 'ARG');
+    const taxRate = (adm === 'ARG') ? 0.21 : ((adm === 'PERU') ? 0.18 : 0);
+    const totalIncomeGross = incomes.reduce((s, r) => s + (Number(r.amount || r.monto || 0) || 0), 0);
+    const totalIncome = taxRate > 0
+      ? incomes.reduce((s, r) => s + ((Number(r.amount || r.monto || 0) || 0) / (1 + taxRate)), 0)
+      : totalIncomeGross;
     const totalExpense = expenses.reduce((s, r) => s + (Number(r.amount || r.monto || 0) || 0), 0);
     const budget = getActiveBudget(projectId);
     const budgetTotal = getApprovedBudgetTotal(budget);
     const remaining = budgetTotal - totalExpense;
     const profit = totalIncome - totalExpense;
     const percentUsed = budgetTotal > 0 ? (totalExpense / budgetTotal) * 100 : 0;
+    // Conversión a USD (moneda local por 1 USD). USA = 1 por defecto.
+    let rate = Number(project.exchangeRateToUSD);
+    if (!isFinite(rate) || rate <= 0) rate = (adm === 'USA') ? 1 : 0;
+    const profitUSD = rate > 0 ? (profit / rate) : 0;
+    const budgetTotalUSD = rate > 0 ? (budgetTotal / rate) : 0;
     return {
-      totalIncome,
+      totalIncome, // net (sin impuesto)
+      totalIncomeGross,
       totalExpense,
       profit,
       budgetTotal,
       totalSpent: totalExpense,
       remaining,
-      percentUsed
+      percentUsed,
+      exchangeRateToUSD: rate,
+      profitUSD,
+      budgetTotalUSD
     };
   }
 
@@ -248,8 +274,6 @@ const DB = (() => {
   function getDashboardStats() {
     const projects = _load('projects');
     const budgets = _load('budgets');
-    const incomes = _load('incomes');
-
     // Proyectos activos — aceptar variantes 'activo' o 'aprobado'
     const activeProjects = projects.filter(p => ['activo','aprobado'].includes(p.status)).length;
 
@@ -261,33 +285,28 @@ const DB = (() => {
     const cancelledStates = ['rechazado','cancelado','cancelled'];
     const cancelledBudgets = budgets.filter(b => cancelledStates.includes((b.status||'').toString())).length;
 
-    // Ganancias totales por administración — sumar tanto 'incomes' como 'operations' tipo 'ingreso'
+    // Calculamos ganancias sumando el `profit` de cada proyecto.
+    // Esto evita contar presupuestos o ingresos sueltos que no representen resultado final del proyecto.
     const earnings = { ARG: 0, PERU: 0, USA: 0 };
+    let totalEarnings = 0;
 
-    // Sumar incomes (colección explícita de ingresos)
-    incomes.forEach(i => {
-      const proj = _load('projects').find(p => p.id === i.projectId) || {};
-      const adm = proj.administration || i.administration || i.currency || 'ARG';
-      const amt = Number(i.amount || i.monto || 0) || 0;
-      if (adm === 'ARG') earnings.ARG += amt;
-      else if (adm === 'PERU') earnings.PERU += amt;
-      else if (adm === 'USA') earnings.USA += amt;
-    });
-
-    // También sumar operaciones tipo 'ingreso' si existen (datos históricos u otras inserciones)
-    const operations = _load('operations');
-    operations.filter(o => o.tipo === 'ingreso' || o.type === 'income').forEach(o => {
-      const adm = o.administration || o.administracion || o.adm || 'ARG';
-      const amt = Number(o.monto || o.amount || 0) || 0;
-      if (adm === 'ARG') earnings.ARG += amt;
-      else if (adm === 'PERU') earnings.PERU += amt;
-      else if (adm === 'USA') earnings.USA += amt;
+    projects.forEach(p => {
+      try {
+        const fin = getProjectFinancials(p.id);
+        const adm = _normalizeAdm(p.administration || p.administracion || p.adm || 'ARG');
+        const profit = Number(fin.profit || 0) || 0;
+        if (adm === 'ARG') earnings.ARG += profit;
+        else if (adm === 'PERU') earnings.PERU += profit;
+        else if (adm === 'USA') earnings.USA += profit;
+        totalEarnings += profit;
+      } catch (e) {
+        console.warn('Error calculando finanzas de proyecto', p.id, e);
+      }
     });
 
     const earningsARG = earnings.ARG;
     const earningsPERU = earnings.PERU;
     const earningsUSA = earnings.USA;
-    const totalEarnings = earningsARG + earningsPERU + earningsUSA;
 
     const totalProjects = projects.length;
     const completedProjects = projects.filter(p => p.status === 'aprobado').length;
@@ -338,13 +357,13 @@ const DB = (() => {
     incomes.forEach(r => {
       const amount = Number(r.amount || r.monto) || 0;
       const proj = _load('projects').find(p => p.id === r.projectId) || {};
-      const adm = proj.administration || r.administration || r.currency || 'ARG';
+        const adm = _normalizeAdm(proj.administration || r.administration || r.currency || 'ARG');
       addToMonth(r.date || r.fecha || r.createdAt, adm, amount);
     });
 
     operations.filter(o => o.tipo === 'ingreso' || o.type === 'income').forEach(o => {
       const amount = Number(o.monto || o.amount) || 0;
-      const adm = o.administration || o.administracion || o.adm || 'ARG';
+      const adm = _normalizeAdm(o.administration || o.administracion || o.adm || 'ARG');
       addToMonth(o.date || o.fecha || o.createdAt, adm, amount);
     });
     return months;

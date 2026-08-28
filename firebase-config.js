@@ -40,9 +40,12 @@ if (isDemoMode) {
     window.auth = window.firebase.auth();
     window.db = window.firebase.firestore();
 
-    if (window.auth && window.auth.setPersistence) {
-      window.auth.setPersistence(window.firebase.auth.Auth.Persistence.LOCAL);
-    }
+    // Use SESSION persistence so the auth session is cleared when the browser is closed.
+    // This makes the app log out when the browser is closed. If you prefer to keep
+    // sessions across restarts, change to LOCAL.
+    window.authPersistenceReady = window.auth && window.auth.setPersistence
+      ? window.auth.setPersistence(window.firebase.auth.Auth.Persistence.SESSION)
+      : Promise.resolve();
 
     console.log('🔥 Firebase inicializado correctamente');
   } catch (error) {

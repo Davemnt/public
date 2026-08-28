@@ -155,6 +155,7 @@ const DB = (() => {
   const cache = {
     budgets: [],
     projects: [],
+    clients: [],
     incomes: [],
     expenses: [],
     operations: [],
@@ -193,6 +194,30 @@ const DB = (() => {
    */
   function _id() {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  }
+
+  /**
+   * sanitizeForFirestore - Remove undefined values from objects/arrays recursively
+   * Firestore does not accept `undefined` as a field value; convert/remove them.
+   */
+  function sanitizeForFirestore(value) {
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+    if (Array.isArray(value)) {
+      return value.map(v => sanitizeForFirestore(v));
+    }
+    if (typeof value === 'object') {
+      const out = {};
+      Object.keys(value).forEach(k => {
+        // Do not send internal sample marker to Firestore
+        if (k === '__sample') return;
+        const v = value[k];
+        const s = sanitizeForFirestore(v);
+        if (s !== undefined) out[k] = s;
+      });
+      return out;
+    }
+    return value;
   }
   
   /**
@@ -241,6 +266,20 @@ const DB = (() => {
         console.error('Error en listener de config:', error);
       }
     );
+  }
+
+  async function _hydrateCollection(col) {
+    try {
+      const snapshot = await _getCollection(col).get();
+      const data = [];
+      snapshot.forEach(doc => data.push({ id: doc.id, ...doc.data() }));
+      cache[col] = data;
+      return data;
+    } catch (error) {
+      console.error(`Error cargando ${col} desde Firestore:`, error);
+      cache[col] = [];
+      return [];
+    }
   }
   
   // ========================================
@@ -293,14 +332,16 @@ const DB = (() => {
         ...data,
         createdAt: data.createdAt || firebase.firestore.FieldValue.serverTimestamp()
       };
+      // Remove undefined values which Firestore rejects
+      const safeDocData = sanitizeForFirestore(docData);
       
       // Si no tiene ID, usar ID generado por Firestore
       if (data.id) {
-        await collectionRef.doc(data.id).set(docData);
-        return { id: data.id, ...docData };
+        await collectionRef.doc(data.id).set(safeDocData);
+        return { id: data.id, ...safeDocData };
       } else {
-        const docRef = await collectionRef.add(docData);
-        return { id: docRef.id, ...docData };
+        const docRef = await collectionRef.add(safeDocData);
+        return { id: docRef.id, ...safeDocData };
       }
       
     } catch (error) {
@@ -327,8 +368,9 @@ const DB = (() => {
         ...data,
         updatedAt: firebase.firestore.FieldValue.serverTimestamp()
       };
-      
-      await collectionRef.doc(id).update(updateData);
+      // Remove undefined values from update payload
+      const safeUpdate = sanitizeForFirestore(updateData);
+      await collectionRef.doc(id).update(safeUpdate);
       
       // Retornar desde cache actualizado
       return get(col, id);
@@ -390,7 +432,8 @@ const DB = (() => {
     try {
       const userId = _getUserId();
       const configRef = db.collection('users').doc(userId).collection('config').doc('company');
-      await configRef.set(data, { merge: true });
+      const safe = sanitizeForFirestore(data);
+      await configRef.set(safe, { merge: true });
     } catch (error) {
       console.error('Error guardando config:', error);
       throw error;
@@ -568,26 +611,43 @@ const DB = (() => {
   function getProjectFinancials(projectId) {
     const budget = getActiveBudget(projectId);
     const budgetTotal = getApprovedBudgetTotal(budget);
-    
+
     const incomes = getIncomesByProject(projectId);
-    const totalIncome = incomes.reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
-    
+    // Determine administration from project to apply correct tax rules
+    const project = get('projects', projectId) || {};
+    const adm = String(project.administration || '').toUpperCase();
+    const taxRate = (adm === 'ARG') ? 0.21 : ((adm === 'PERU') ? 0.18 : 0);
+    const totalIncomeGross = incomes.reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
+    const totalIncome = taxRate > 0
+      ? incomes.reduce((s, i) => s + ((Number(i.amount) || 0) / (1 + taxRate)), 0)
+      : totalIncomeGross;
+
     const expenses = getExpensesByProject(projectId);
     const totalExpense = expenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
     const totalSpent = totalExpense; // Alias para compatibilidad
-    
+
     const profit = totalIncome - totalExpense;
     const remaining = budgetTotal - totalSpent;
     const percentUsed = budgetTotal > 0 ? (totalSpent / budgetTotal) * 100 : 0;
-    
+
+    // Conversión a USD (moneda local por 1 USD). USA = 1 por defecto.
+    let rate = Number(project.exchangeRateToUSD);
+    if (!isFinite(rate) || rate <= 0) rate = (adm === 'USA') ? 1 : 0;
+    const profitUSD = rate > 0 ? (profit / rate) : 0;
+    const budgetTotalUSD = rate > 0 ? (budgetTotal / rate) : 0;
+
     return {
       budgetTotal,
-      totalIncome,
+      totalIncome, // net (sin impuesto)
+      totalIncomeGross,
       totalExpense,
       totalSpent,
       profit,
       remaining,
-      percentUsed: Math.round(percentUsed)
+      percentUsed: Math.round(percentUsed),
+      exchangeRateToUSD: rate,
+      profitUSD,
+      budgetTotalUSD
     };
   }
   
@@ -612,41 +672,44 @@ const DB = (() => {
   function getDashboardStats() {
     const projects = getAll('projects');
     const budgets = getAll('budgets');
-    const operations = getAll('operations');
-    
+
     // Proyectos activos — aceptar variantes de estado ('activo' o 'aprobado')
     const activeProjects = projects.filter(p => ['activo','aprobado'].includes(p.status)).length;
-    
+
     // Presupuestos pendientes (borrador + enviado)
     const pendingBudgets = budgets.filter(b => ['borrador','enviado'].includes(b.status)).length;
-    
+
     // Presupuestos cancelados
     const cancelledBudgets = budgets.filter(b => b.status === 'rechazado').length;
-    
-    // Ganancias totales por administración
-    const earningsARG = operations
-      .filter(o => o.tipo === 'ingreso' && o.administration === 'ARG')
-      .reduce((s, r) => s + (Number(r.monto) || 0), 0);
-    
-    const earningsPERU = operations
-      .filter(o => o.tipo === 'ingreso' && o.administration === 'PERU')
-      .reduce((s, r) => s + (Number(r.monto) || 0), 0);
-    
-    const earningsUSA = operations
-      .filter(o => o.tipo === 'ingreso' && o.administration === 'USA')
-      .reduce((s, r) => s + (Number(r.monto) || 0), 0);
-    
-    const totalEarnings = earningsARG + earningsPERU + earningsUSA;
-    
-    // Stats adicionales para administraciones
+
+    // Ganancias por administración = suma de profit real de cada proyecto (mismo cálculo que la lista de proyectos)
+    const earnings = { ARG: 0, PERU: 0, USA: 0 };
+    let earningsUSD = 0;
+    projects.forEach(p => {
+      try {
+        const fin = getProjectFinancials(p.id);
+        const adm = String(p.administration || '').toUpperCase();
+        const profit = Number(fin.profit || 0) || 0;
+        if (adm === 'ARG') earnings.ARG += profit;
+        else if (adm === 'PERU') earnings.PERU += profit;
+        else if (adm === 'USA') earnings.USA += profit;
+        earningsUSD += Number(fin.profitUSD || 0) || 0;
+      } catch (e) { /* ignore */ }
+    });
+
+    const earningsARG = earnings.ARG;
+    const earningsPERU = earnings.PERU;
+    const earningsUSA = earnings.USA;
+    // totalEarnings queda como consolidado en USD (única moneda válida para sumar entre países)
+    const totalEarnings = earningsUSD;
+
     const totalProjects = projects.length;
-    // Contabilizar proyectos completados o aprobados como finalizados
     const completedProjects = projects.filter(p => ['completado','aprobado'].includes(p.status)).length;
-    
-    const totalSpent = operations
+
+    const totalSpent = getAll('operations')
       .filter(o => o.tipo === 'egreso')
       .reduce((s, r) => s + (Number(r.monto) || 0), 0);
-    
+
     return {
       activeProjects,
       pendingBudgets,
@@ -654,6 +717,7 @@ const DB = (() => {
       earningsARG,
       earningsPERU,
       earningsUSA,
+      earningsUSD,
       totalEarnings,
       totalProjects,
       completedProjects,
@@ -718,20 +782,42 @@ const DB = (() => {
     // MODO PRODUCCIÓN: Iniciar listeners de Firestore
     try {
       if (!Auth.isAuthenticated()) {
+        await new Promise((resolve) => {
+          const unsubscribe = Auth.onAuthStateChanged((user) => {
+            if (user) {
+              unsubscribe();
+              resolve();
+            }
+          });
+          setTimeout(() => {
+            unsubscribe();
+            resolve();
+          }, 1500);
+        });
+      }
+
+      if (!Auth.isAuthenticated()) {
         console.warn('⚠️ Usuario no autenticado, no se pueden inicializar listeners');
         return;
       }
-      
+
+      const collections = ['budgets', 'projects', 'clients', 'incomes', 'expenses', 'operations', 'invoices'];
+      for (const col of collections) {
+        await _hydrateCollection(col);
+      }
+      await _hydrateCollection('config');
+
       // Iniciar listeners para todas las colecciones
       _startListener('budgets');
       _startListener('projects');
+      _startListener('clients');
       _startListener('incomes');
       _startListener('expenses');
       _startListener('operations');
       _startListener('invoices');
       _startConfigListener();
       
-      console.log('✅ DB inicializado con listeners en tiempo real');
+      console.log('✅ DB inicializado con caché y listeners en tiempo real');
       
     } catch (error) {
       console.error('❌ Error inicializando DB:', error);
@@ -752,6 +838,7 @@ const DB = (() => {
     // Limpiar cache
     cache.budgets = [];
     cache.projects = [];
+    cache.clients = [];
     cache.incomes = [];
     cache.expenses = [];
     cache.operations = [];

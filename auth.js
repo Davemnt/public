@@ -21,6 +21,22 @@ const Auth = (() => {
   
   const DEMO_PIN = '1234';
   const DEMO_EMAIL = 'demo@aurea.local';
+  const ALLOWED_EMAILS = ['aureatechnicalart@gmail.com'];
+
+  function normalizeEmail(email) {
+    return String(email || '').trim().toLowerCase();
+  }
+
+  function assertAllowedEmail(email) {
+    const normalized = normalizeEmail(email);
+    if (!normalized) {
+      throw new Error('El email es obligatorio');
+    }
+
+    if (!ALLOWED_EMAILS.includes(normalized)) {
+      throw new Error('Este email no tiene acceso autorizado a la app.');
+    }
+  }
   
   /**
    * Login en modo DEMO - PIN hardcodeado: 1234
@@ -38,7 +54,9 @@ const Auth = (() => {
       // Usar sessionStorage en modo demo para exigir login al abrir una nueva sesión
       sessionStorage.setItem('aurea_demo_user', JSON.stringify(demoUser));
       sessionStorage.setItem('aurea_user_email', DEMO_EMAIL);
-      
+      updateLastActivity();
+      try { localStorage.setItem('aurea_enable_inactivity_watch','true'); } catch(e) {}
+      startInactivityWatcher();
       console.log('✅ Login DEMO exitoso');
       return demoUser;
     } else {
@@ -64,7 +82,9 @@ const Auth = (() => {
     // Guardar en sessionStorage para que el demo no recuerde la sesión indefinidamente
     sessionStorage.setItem('aurea_demo_user', JSON.stringify(demoUser));
     sessionStorage.setItem('aurea_user_email', email);
-    
+    updateLastActivity();
+    try { localStorage.setItem('aurea_enable_inactivity_watch','true'); } catch(e) {}
+    startInactivityWatcher();
     console.log('✅ Registro DEMO exitoso');
     console.log('📌 IMPORTANTE: En modo DEMO el PIN es siempre: 1234');
     
@@ -100,6 +120,35 @@ const Auth = (() => {
    */
   function getUserIdDemo() {
     return 'demo-user-local';
+  }
+
+  function persistUserEmail(email) {
+    if (!email) return;
+    try {
+      localStorage.setItem('aurea_user_email', email);
+      sessionStorage.setItem('aurea_user_email', email);
+    } catch (error) {
+      console.warn('No se pudo persistir el email del usuario:', error);
+    }
+  }
+
+  function getSavedUserEmail() {
+    try {
+      const savedEmail = localStorage.getItem('aurea_user_email') || sessionStorage.getItem('aurea_user_email');
+      if (savedEmail) return savedEmail;
+    } catch (error) {
+      const savedEmail = sessionStorage.getItem('aurea_user_email');
+      if (savedEmail) return savedEmail;
+    }
+
+    // En esta app solo hay un email autorizado por diseño.
+    // Si el navegador no persiste el email aún, usamos ese valor por defecto
+    // para evitar rechazar un PIN válido en el primer intento.
+    if (ALLOWED_EMAILS.length === 1) {
+      return ALLOWED_EMAILS[0];
+    }
+
+    return null;
   }
   
   /**
@@ -248,7 +297,10 @@ const Auth = (() => {
     // MODO PRODUCCIÓN: Usar Firebase
     try {
       // Validaciones
-      if (!email || !email.includes('@')) {
+      const normalizedEmail = normalizeEmail(email);
+      assertAllowedEmail(normalizedEmail);
+
+      if (!normalizedEmail || !normalizedEmail.includes('@')) {
         throw new Error('Email inválido');
       }
       
@@ -287,6 +339,8 @@ const Auth = (() => {
         taxId: '',
         logo: ''
       });
+
+      persistUserEmail(email);
       
       console.log('✅ Usuario registrado:', email);
       return user;
@@ -316,6 +370,8 @@ const Auth = (() => {
     
     // MODO PRODUCCIÓN: Usar Firebase
     try {
+      await (window.authPersistenceReady || Promise.resolve());
+
       // Validar PIN
       if (!pin || pin.length < 4 || pin.length > 6) {
         throw new Error('PIN inválido');
@@ -323,40 +379,45 @@ const Auth = (() => {
       
       // Hashear PIN ingresado
       const hashedPIN = await hashPIN(pin);
+      const tempPassword = hashedPIN.substring(0, 20);
       
-      // Obtener el usuario actual (debe estar guardado en localStorage)
-      const savedEmail = localStorage.getItem('aurea_user_email');
+      // Obtener el email guardado para el usuario actual.
+      // Como la app tiene un único email autorizado, si no se persistió aún,
+      // usamos el autorizado por defecto para no rechazar el PIN correcto.
+      const savedEmail = getSavedUserEmail() || (auth.currentUser && auth.currentUser.email);
       
       if (!savedEmail) {
         throw new Error('No hay usuario registrado. Por favor, registrate primero.');
       }
+
+      assertAllowedEmail(savedEmail);
+      persistUserEmail(savedEmail);
       
-      // Buscar el usuario en Firestore
-      const userSnapshot = await db.collection('users')
-        .where('email', '==', savedEmail)
-        .limit(1)
-        .get();
+      // Primero autenticarse con Firebase usando el email y la contraseña temporal derivada del PIN
+      const userCredential = await auth.signInWithEmailAndPassword(savedEmail, tempPassword);
+      const userDoc = await db.collection('users').doc(userCredential.user.uid).get();
       
-      if (userSnapshot.empty) {
+      if (!userDoc.exists) {
+        await auth.signOut();
         throw new Error('Usuario no encontrado');
       }
+
+      const userData = userDoc.data();
       
-      const userData = userSnapshot.docs[0].data();
-      
-      // Verificar PIN
+      // Verificar PIN contra el hash guardado en el perfil del usuario
       if (userData.pinHash !== hashedPIN) {
+        await auth.signOut();
         throw new Error('PIN incorrecto');
       }
-      
-      // Login con Firebase Auth (usando el hash como contraseña)
-      const tempPassword = hashedPIN.substring(0, 20);
-      const userCredential = await auth.signInWithEmailAndPassword(savedEmail, tempPassword);
       
       // Actualizar último login
       await db.collection('users').doc(userCredential.user.uid).update({
         lastLogin: firebase.firestore.FieldValue.serverTimestamp()
       });
       
+      updateLastActivity();
+      try { localStorage.setItem('aurea_enable_inactivity_watch','true'); } catch(e) {}
+      startInactivityWatcher();
       console.log('✅ Login exitoso');
       return userCredential.user;
       
@@ -379,19 +440,26 @@ const Auth = (() => {
    */
   async function loginWithEmail(email, pin) {
     try {
+      await (window.authPersistenceReady || Promise.resolve());
+
+      const normalizedEmail = normalizeEmail(email);
+      assertAllowedEmail(normalizedEmail);
+
       const hashedPIN = await hashPIN(pin);
       const tempPassword = hashedPIN.substring(0, 20);
       
-      const userCredential = await auth.signInWithEmailAndPassword(email, tempPassword);
+      const userCredential = await auth.signInWithEmailAndPassword(normalizedEmail, tempPassword);
       
       // Guardar email para próximos logins con PIN
-      localStorage.setItem('aurea_user_email', email);
+      persistUserEmail(email);
       
       // Actualizar último login
       await db.collection('users').doc(userCredential.user.uid).update({
         lastLogin: firebase.firestore.FieldValue.serverTimestamp()
       });
       
+      updateLastActivity();
+      if (isInactivityEnabled()) startInactivityWatcher();
       console.log('✅ Login con email exitoso');
       return userCredential.user;
       
@@ -448,36 +516,50 @@ const Auth = (() => {
       }
 
       const user = auth.currentUser;
-      
       if (!user) {
         throw new Error('No hay usuario autenticado');
       }
-      
-      // Validar nuevo PIN
+
       if (!newPIN || newPIN.length < 4 || newPIN.length > 6) {
         throw new Error('El PIN debe tener entre 4 y 6 dígitos');
       }
-      
+
       if (!/^\d+$/.test(newPIN)) {
         throw new Error('El PIN solo puede contener números');
       }
-      
-      // Hashear nuevo PIN
+
+      if (currentPIN !== null && currentPIN !== undefined) {
+        const currentHash = await hashPIN(String(currentPIN));
+        const currentTempPassword = currentHash.substring(0, 20);
+        const userDoc = await db.collection('users').doc(user.uid).get();
+        const savedPinHash = userDoc.exists ? userDoc.data()?.pinHash : null;
+
+        if (!savedPinHash || savedPinHash !== currentHash) {
+          throw new Error('El PIN actual es incorrecto');
+        }
+
+        try {
+          const credential = firebase.auth.EmailAuthProvider.credential(user.email, currentTempPassword);
+          await user.reauthenticateWithCredential(credential);
+        } catch (reauthError) {
+          console.error('❌ Error reautenticando PIN actual:', reauthError);
+          throw new Error('El PIN actual es incorrecto');
+        }
+      }
+
       const hashedPIN = await hashPIN(newPIN);
       const tempPassword = hashedPIN.substring(0, 20);
-      
-      // Actualizar contraseña en Auth
+
       await user.updatePassword(tempPassword);
-      
-      // Actualizar PIN en Firestore
+
       await db.collection('users').doc(user.uid).update({
         pinHash: hashedPIN,
         updatedAt: firebase.firestore.FieldValue.serverTimestamp()
       });
-      
+
       console.log('✅ PIN cambiado exitosamente');
       return true;
-      
+
     } catch (error) {
       console.error('❌ Error cambiando PIN:', error);
       throw error;
@@ -494,6 +576,8 @@ const Auth = (() => {
   async function logout() {
     // MODO DEMO
     if (window.isDemoMode) {
+      stopInactivityWatcher();
+      sessionStorage.removeItem('aurea_last_activity');
       return logoutDemo();
     }
     
@@ -501,10 +585,143 @@ const Auth = (() => {
     try {
       await auth.signOut();
       console.log('✅ Sesión cerrada');
-      window.location.reload();
+      stopInactivityWatcher();
+      sessionStorage.removeItem('aurea_last_activity');
+      window.location.href = 'login.html';
     } catch (error) {
       console.error('❌ Error cerrando sesión:', error);
     }
+  }
+
+  // ========================================
+  // INACTIVITY / SESSION WATCHER
+  // ========================================
+
+  const DEFAULT_INACTIVITY_MS = Number(localStorage.getItem('aurea_inactivity_timeout_ms')) || (15 * 60 * 1000); // 15 min
+  let _inactivityInterval = null;
+  const _activityEvents = ['mousemove','keydown','click','touchstart'];
+  let _inactivityWarningShown = false;
+  let _watcherActive = false;
+
+  function updateLastActivity() {
+    try {
+      const ts = String(Date.now());
+      // write to sessionStorage primarily, but also keep a copy in localStorage
+      try { sessionStorage.setItem('aurea_last_activity', ts); } catch (e) {}
+      try { localStorage.setItem('aurea_last_activity', ts); } catch (e) {}
+    } catch (e) { /* ignore */ }
+  }
+
+  function _onActivity() {
+    updateLastActivity();
+    // If a warning modal is visible, close it because user became active
+    try {
+      if (typeof Swal !== 'undefined' && Swal.isVisible()) {
+        Swal.close();
+        _inactivityWarningShown = false;
+      }
+    } catch (e) {}
+  }
+
+  function startInactivityWatcher() {
+    try {
+      // clear existing
+      stopInactivityWatcher();
+      updateLastActivity();
+      _watcherActive = true;
+      _activityEvents.forEach(ev => document.addEventListener(ev, _onActivity));
+      // check every minute
+      _inactivityInterval = setInterval(() => {
+        try {
+          const last = Number(sessionStorage.getItem('aurea_last_activity') || 0);
+          const timeout = Number(localStorage.getItem('aurea_inactivity_timeout_ms')) || DEFAULT_INACTIVITY_MS;
+          const countdownSec = Number(localStorage.getItem('aurea_expire_countdown_s')) || 60; // seconds before expiry to warn
+          const now = Date.now();
+          const elapsed = last ? (now - last) : Infinity;
+          const remaining = timeout - elapsed;
+
+          if (remaining <= 0) {
+            // expired
+            console.log('⚠️ Sesión cerrada por inactividad');
+            try { if (typeof notify === 'function') notify('Sesión cerrada por inactividad', 'info'); } catch(e){}
+            logout();
+            return;
+          }
+
+          // Show warning when remaining <= countdownSec*1000 and no warning yet
+          if (remaining <= (countdownSec * 1000) && !_inactivityWarningShown) {
+            _inactivityWarningShown = true;
+            try {
+              if (typeof Swal !== 'undefined') {
+                let timerInterval;
+                Swal.fire({
+                  title: 'Sesión por expirar',
+                  html: `Tu sesión expirará en <b></b> segundos. ¿Querés extenderla?`,
+                  icon: 'warning',
+                  showCancelButton: true,
+                  confirmButtonText: 'Extender sesión',
+                  cancelButtonText: 'Cerrar sesión',
+                  allowOutsideClick: false,
+                  willOpen: () => {
+                    const b = Swal.getHtmlContainer().querySelector('b');
+                    timerInterval = setInterval(() => {
+                      const left = Math.max(0, Math.ceil(remaining / 1000 - ((Date.now() - now) / 1000)));
+                      if (b) b.textContent = left;
+                    }, 250);
+                  },
+                  didClose: () => { try { clearInterval(timerInterval); } catch(e){} },
+                  preConfirm: () => {
+                    // Extend session
+                    updateLastActivity();
+                    _inactivityWarningShown = false;
+                    return true;
+                  }
+                }).then((r) => {
+                  if (r.isConfirmed) {
+                    // user extended; nothing else
+                  } else {
+                    // closed or canceled -> logout
+                    logout();
+                  }
+                });
+              }
+            } catch (e) { console.warn('No se pudo mostrar el modal de expiración:', e); }
+          }
+        } catch (e) { console.warn('Error en watcher de inactividad:', e); }
+      }, 5 * 1000); // check every 5s for quicker warnings/responses
+    } catch (e) { console.warn('No se pudo iniciar watcher de inactividad:', e); }
+  }
+
+  function stopInactivityWatcher() {
+    try {
+      if (_inactivityInterval) { clearInterval(_inactivityInterval); _inactivityInterval = null; }
+      _watcherActive = false;
+      _activityEvents.forEach(ev => document.removeEventListener(ev, _onActivity));
+    } catch (e) { /* ignore */ }
+  }
+
+  // Opcional: controlar si el watcher está activado (por defecto false)
+  function isInactivityEnabled() {
+    return String(localStorage.getItem('aurea_enable_inactivity_watch')) === 'true';
+  }
+
+  function enableInactivityWatcher() {
+    try {
+      localStorage.setItem('aurea_enable_inactivity_watch', 'true');
+      // Ensure there's a last activity timestamp (try sessionStorage then localStorage)
+      try {
+        const existing = sessionStorage.getItem('aurea_last_activity') || localStorage.getItem('aurea_last_activity');
+        if (!existing) updateLastActivity();
+      } catch (e) { updateLastActivity(); }
+      startInactivityWatcher();
+    } catch (e) { console.warn('No se pudo habilitar watcher de inactividad:', e); }
+  }
+
+  function disableInactivityWatcher() {
+    try {
+      localStorage.setItem('aurea_enable_inactivity_watch', 'false');
+      stopInactivityWatcher();
+    } catch (e) { console.warn('No se pudo deshabilitar watcher de inactividad:', e); }
   }
   
   // ========================================
@@ -655,7 +872,21 @@ const Auth = (() => {
     getCurrentUser,
     getUserId,
     onAuthStateChanged,
-    migrateLocalData
+    migrateLocalData,
+    // Inactivity controls (opcional)
+    isInactivityEnabled,
+    enableInactivityWatcher,
+    disableInactivityWatcher
+    ,
+    // Debug helper to inspect inactivity watcher state
+    debugStatus: () => ({
+      watcherActive: _watcherActive,
+      warningShown: _inactivityWarningShown,
+      lastActivitySession: sessionStorage.getItem('aurea_last_activity'),
+      lastActivityLocal: localStorage.getItem('aurea_last_activity'),
+      timeoutMs: localStorage.getItem('aurea_inactivity_timeout_ms') || DEFAULT_INACTIVITY_MS,
+      countdownSec: localStorage.getItem('aurea_expire_countdown_s') || 60
+    })
   };
   
 })();

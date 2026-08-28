@@ -28,6 +28,32 @@ const ADMIN = {
   USA:  { label: 'United States',   flag: 'US', code: 'USD', locale: 'en-US', symbol: 'U$D', flagColor: '#2e7d32', invoice: true  },
 };
 
+window.saveSessionSettings = function() {
+  try {
+    const enabled = !!document.getElementById('session-enable-watch')?.checked;
+    const minutes = Number(document.getElementById('session-timeout-min')?.value) || 30;
+    const countdown = Number(document.getElementById('session-countdown-s')?.value) || 8;
+
+    localStorage.setItem('aurea_enable_inactivity_watch', enabled ? 'true' : 'false');
+    localStorage.setItem('aurea_inactivity_timeout_ms', String(Math.max(1, minutes) * 60 * 1000));
+    localStorage.setItem('aurea_expire_countdown_s', String(Math.max(3, countdown)));
+
+    notify('Ajustes de sesión guardados', 'success');
+
+    // Apply immediately via Auth API if available
+    try {
+      if (enabled && typeof Auth.enableInactivityWatcher === 'function') {
+        Auth.enableInactivityWatcher();
+      } else if (!enabled && typeof Auth.disableInactivityWatcher === 'function') {
+        Auth.disableInactivityWatcher();
+      }
+    } catch (e) { console.warn('No se pudo aplicar watcher inmediatamente:', e); }
+  } catch (e) {
+    console.error('Error guardando ajustes de sesión:', e);
+    notify('No se pudieron guardar los ajustes', 'error');
+  }
+};
+
 /**
  * PROJECT_STATUS - Estados posibles de un proyecto
  */
@@ -35,6 +61,7 @@ const PROJECT_STATUS = {
   pendiente: { label: 'Pendiente', badge: 'badge-yellow' },
   aprobado:  { label: 'Aprobado',  badge: 'badge-green'  },
   finalizado:{ label: 'Finalizado', badge: 'badge-blue'   },
+  cobrado:   { label: 'Cobrado',    badge: 'badge-purple' },
 };
 
 /**
@@ -61,6 +88,7 @@ const INVOICE_STATUS = {
   borrador:  { label: 'Borrador',  badge: 'badge-gray'  },
   pendiente: { label: 'Pendiente', badge: 'badge-yellow' },
   enviado:   { label: 'Enviado',   badge: 'badge-blue'  },
+  cobrado:   { label: 'Cobrado',   badge: 'badge-green' }
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -74,18 +102,23 @@ const INVOICE_STATUS = {
  * @returns {string} Monto formateado (ej: "$1,234.56" o "S/1,234.56")
  */
 function fmtCurrency(amount, adm) {
-  const a = ADMIN[adm] || ADMIN.ARG;
-  const n = Number(amount) || 0;
-
-  if (adm === 'USA' || a.code === 'USD') {
-    return `USD ${n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+  const n = Math.floor(Number(amount) || 0); // no decimals
+  // Resolve admin config by key or by currency code
+  let a = ADMIN[adm] || Object.values(ADMIN).find(x => x.code === adm) || ADMIN.ARG;
+  // For Spanish administrations (ARG, PERU) force thousands separator as dot
+  if (String(a.locale || '').startsWith('es')) {
+    const int = String(Math.abs(n));
+    const withDots = int.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+    const sign = n < 0 ? '-' : '';
+    const out = a.code === 'PEN' ? `S./ ${sign}${withDots}` : `$ ${sign}${withDots}`;
+    if (n < 0) return `<span class="text-red-600">${out}</span>`;
+    return out;
   }
-
-  if (a.code === 'PEN') {
-    return `S./ ${n.toLocaleString('es-PE', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
-  }
-
-  return `$ ${n.toLocaleString('es-AR', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+  // Default: use locale formatting (USD)
+  const formatted = n.toLocaleString(a.locale || 'en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  const out = a.code === 'USD' ? `USD ${formatted}` : `${a.symbol || '$'} ${formatted}`;
+  if (n < 0) return `<span class="text-red-600">${out}</span>`;
+  return out;
 }
 
 function fmtDate(str) {
@@ -94,6 +127,32 @@ function fmtDate(str) {
     const [y,m,d] = str.split('-');
     return `${d}/${m}/${y}`;
   } catch { return str; }
+}
+
+// parseToMs - global helper to convert many date representations to epoch ms
+function parseToMs(v) {
+  if (!v) return 0;
+  if (typeof v === 'object' && v !== null && typeof v.seconds === 'number') {
+    return (v.seconds * 1000) + (v.nanoseconds ? Math.round(v.nanoseconds / 1e6) : 0);
+  }
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string') {
+    const n = Date.parse(v);
+    if (!isNaN(n)) return n;
+    const m = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (m) {
+      const day = Number(m[1]);
+      const month = Number(m[2]) - 1;
+      const year = Number(m[3]);
+      return new Date(year, month, day).getTime();
+    }
+    return 0;
+  }
+  if (v instanceof Date) return v.getTime();
+  if (typeof v === 'object' && typeof v.toDate === 'function') {
+    try { return v.toDate().getTime(); } catch (e) { return 0; }
+  }
+  return 0;
 }
 
 function canGenerateInvoicesForProject(projectOrAdministration) {
@@ -266,7 +325,11 @@ function renderDashboard() {
   setBreadcrumb([{ label: 'Dashboard' }]);
   setActions('');
   const s = DB.getDashboardStats();
-  const fmtRaw = n => `$${Number(n).toLocaleString('es-AR', {minimumFractionDigits:0, maximumFractionDigits:0})}`;
+  const fmtRaw = n => {
+    const val = Number(n) || 0;
+    const s = `$${Math.abs(val).toLocaleString('es-AR', {minimumFractionDigits:0, maximumFractionDigits:0})}`;
+    return val < 0 ? `<span class="text-red-600">-${s}</span>` : s;
+  };
 
   const kpis = [
     { label: 'Proyectos activos',       value: s.activeProjects,    icon: 'folder',  color: 'blue' },
@@ -310,7 +373,11 @@ function renderDashboard() {
   `).join('');
 
   // Recent projects
-  const recentProjects = DB.getAll('projects').sort((a,b) => b.createdAt > a.createdAt ? 1 : -1).slice(0, 5);
+  const recentProjects = (DB.getAll('projects') || []).slice().sort((a,b) => {
+    const ta = parseToMs(a.date || a.createdAt || a.created || a.created_at);
+    const tb = parseToMs(b.date || b.createdAt || b.created || b.created_at);
+    return tb - ta;
+  }).slice(0,5);
   const recentHTML = recentProjects.length ? recentProjects.map(p => `
     <tr onclick="navigate('#/projects/${p.id}')" class="cursor-pointer">
       <td><span class="font-medium text-gray-900">${esc(p.name)}</span></td>
@@ -393,17 +460,40 @@ function renderDashboard() {
 
   // Chart
   requestAnimationFrame(() => {
-    const ctx = document.getElementById('dash-chart');
-    if (!ctx) return;
-    const months = DB.getMonthlyData();
-    _dashChart = new Chart(ctx, {
+    try {
+      const canvas = document.getElementById('dash-chart');
+      if (!canvas) return;
+      if (typeof window.Chart === 'undefined') {
+        canvas.parentElement.innerHTML = '<p class="text-sm text-gray-400">Gráfico no disponible (Chart.js no cargado).</p>';
+        return;
+      }
+      const ctx = canvas.getContext ? canvas.getContext('2d') : canvas;
+      const months = DB.getMonthlyData() || [];
+      const labels = months.map(m => m.label || '');
+      const dataARG = months.map(m => Number(m.earningsARG || 0));
+      const dataPERU = months.map(m => Number(m.earningsPERU || 0));
+      const dataUSA = months.map(m => Number(m.earningsUSA || 0));
+      // Debugging: print monthly data arrays to console to diagnose empty charts
+      console.log('[dash] months:');
+      console.table(months || []);
+      console.log('[dash] labels:', labels);
+      console.log('[dash] dataARG:', dataARG);
+      console.log('[dash] dataPERU:', dataPERU);
+      console.log('[dash] dataUSA:', dataUSA);
+      const totalValues = dataARG.concat(dataPERU, dataUSA).reduce((s, v) => s + (Number(v) || 0), 0);
+      if (!totalValues) {
+        // no data to display — show a friendly placeholder and hint how to load sample data
+        if (canvas && canvas.parentElement) canvas.parentElement.innerHTML = '<div class="p-6 text-center text-sm text-gray-400">No hay datos de ingresos para los últimos 12 meses.<br><small>Si querés probar la app, ejecutá <code>cargarDatosEjemplo()</code> en la consola para cargar datos de muestra.</small></div>';
+        return;
+      }
+      _dashChart = new Chart(ctx, {
       type: 'bar',
       data: {
-        labels: months.map(m => m.label),
+        labels,
         datasets: [
-          { label: 'Argentina', data: months.map(m => m.earningsARG), backgroundColor: ADMIN.ARG.flagColor + '80', borderColor: ADMIN.ARG.flagColor, borderWidth: 1.5, borderRadius: 6 },
-          { label: 'Perú', data: months.map(m => m.earningsPERU), backgroundColor: ADMIN.PERU.flagColor + '80', borderColor: ADMIN.PERU.flagColor, borderWidth: 1.5, borderRadius: 6 },
-          { label: 'USA', data: months.map(m => m.earningsUSA), backgroundColor: ADMIN.USA.flagColor + '80', borderColor: ADMIN.USA.flagColor, borderWidth: 1.5, borderRadius: 6 },
+          { label: 'Argentina', data: dataARG, backgroundColor: ADMIN.ARG.flagColor + '80', borderColor: ADMIN.ARG.flagColor, borderWidth: 1.5, borderRadius: 6 },
+          { label: 'Perú', data: dataPERU, backgroundColor: ADMIN.PERU.flagColor + '80', borderColor: ADMIN.PERU.flagColor, borderWidth: 1.5, borderRadius: 6 },
+          { label: 'USA', data: dataUSA, backgroundColor: ADMIN.USA.flagColor + '80', borderColor: ADMIN.USA.flagColor, borderWidth: 1.5, borderRadius: 6 },
         ]
       },
       options: {
@@ -414,7 +504,12 @@ function renderDashboard() {
           y: { grid: { color: '#f1f5f9' }, ticks: { font: { family: 'Inter', size: 11 } } }
         }
       }
-    });
+      });
+    } catch (err) {
+      console.error('Error creando gráfico de dashboard:', err);
+      const canvas = document.getElementById('dash-chart');
+      if (canvas && canvas.parentElement) canvas.parentElement.innerHTML = '<p class="text-sm text-gray-400">No se pudo renderizar el gráfico.</p>';
+    }
   });
 }
 
@@ -428,7 +523,53 @@ function renderProjects() {
     Nuevo Proyecto
   </button>`);
 
-  const projects = DB.getAll('projects').sort((a,b) => b.createdAt > a.createdAt ? 1 : -1);
+  const projects = (DB.getAll('projects') || []).slice();
+  // Helper to convert different date formats to milliseconds
+  const toMs = (v) => {
+    if (!v) return 0;
+    // Firebase Timestamp (compat or modular)
+    if (typeof v === 'object' && v !== null && typeof v.seconds === 'number') {
+      return (v.seconds * 1000) + (v.nanoseconds ? Math.round(v.nanoseconds / 1e6) : 0);
+    }
+    if (typeof v === 'number') return v;
+    if (typeof v === 'string') {
+      const n = Date.parse(v);
+      if (!isNaN(n)) return n;
+      // Try dd/mm/yyyy or d/m/yyyy
+      const m = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (m) {
+        const day = Number(m[1]);
+        const month = Number(m[2]) - 1;
+        const year = Number(m[3]);
+        return new Date(year, month, day).getTime();
+      }
+      return 0;
+    }
+    if (v instanceof Date) return v.getTime();
+    if (typeof v === 'object' && typeof v.toDate === 'function') {
+      try { return v.toDate().getTime(); } catch (e) { return 0; }
+    }
+    return 0;
+  };
+
+  // Prefer the explicit project `date` (what user sees) for ordering.
+  // Fallback to createdAt / created timestamps if `date` is not provided.
+  const pick = (p) => (p && (p.date || p.createdAt || p.created || p.created_at || p.startDate || p.start_date)) || 0;
+
+  projects.sort((a, b) => {
+    const ta = toMs(pick(a));
+    const tb = toMs(pick(b));
+    return tb - ta; // most recent first
+  });
+
+  // Debug: print computed timestamps to console to help diagnose ordering
+  try {
+    console.log('[projects] ordering debug: id, name, rawDate, ts');
+    projects.forEach(p => {
+      const raw = pick(p);
+      console.log(p.id, p.name, raw, toMs(raw));
+    });
+  } catch (e) { /* ignore */ }
 
   const rowsHTML = projects.length ? projects.map(p => {
     const fin = DB.getProjectFinancials(p.id);
@@ -438,10 +579,10 @@ function renderProjects() {
         <div class="font-semibold text-gray-900">${esc(p.name)}</div>
         <div class="text-xs text-gray-400 mt-0.5">${esc(p.client||'—')}</div>
       </td>
-      <td>${adminBadge(p.administration)}</td>
+      <td class="nowrap-cell">${adminBadge(p.administration)}</td>
       <td>${badge(p.status, PROJECT_STATUS)}</td>
-      <td class="text-gray-700 font-medium">${fmtCurrency(fin.totalIncome, p.administration)}</td>
-      <td class="font-medium ${fin.profit >= 0 ? 'text-green-600' : 'text-red-600'}">${fmtCurrency(fin.profit, p.administration)}</td>
+      <td class="text-gray-700 font-medium nowrap-cell">${fmtCurrency(fin.totalIncome, p.administration)}</td>
+      <td class="font-medium nowrap-cell ${fin.profit >= 0 ? 'text-green-600' : 'text-red-600'}">${fmtCurrency(fin.profit, p.administration)}</td>
       <td class="text-gray-400">${fmtDate(p.date)}</td>
       <td>
         <div class="flex gap-2" onclick="event.stopPropagation()">
@@ -583,11 +724,36 @@ function renderProjectForm(id) {
     }
   }).then(async r => {
     if (!r.isConfirmed) return navigate(id ? `#/projects/${id}` : '#/projects');
-    if (id) { DB.update('projects', id, r.value); notify('Proyecto actualizado'); navigate(`#/projects/${id}`); }
-    else {
-      const p = await DB.add('projects', r.value);
-      notify('Proyecto creado');
-      navigate(`#/projects/${p.id}`);
+    try {
+      notify('Guardando proyecto...', 'info');
+        if (id) {
+          const oldProject = DB.get('projects', id) || {};
+          await DB.update('projects', id, r.value);
+          notify('Proyecto actualizado');
+          // If status changed to 'cobrado', mark incomes and invoices as paid
+          try {
+            if ((oldProject.status !== r.value.status) && r.value.status === 'cobrado') {
+              const todayStr = new Date().toISOString().slice(0,10);
+              // Mark incomes as cobrado
+              (DB.getIncomesByProject(id) || []).forEach(i => {
+                if (!i.paid) DB.update('incomes', i.id, { paid: true, cobradoDate: todayStr });
+              });
+              // Mark invoices as cobrado
+              (DB.getInvoicesByProject(id) || []).forEach(inv => {
+                if (inv.status !== 'cobrado') DB.update('invoices', inv.id, { status: 'cobrado', cobradoDate: todayStr });
+              });
+              notify('Proyecto marcado como Cobrado: ingresos y facturas actualizados', 'success');
+            }
+          } catch (e) { console.error('Error marcando cobros:', e); }
+          navigate(`#/projects/${id}`);
+        } else {
+          const p = await DB.add('projects', r.value);
+          notify('Proyecto creado');
+          navigate(`#/projects/${p.id}`);
+        }
+    } catch (error) {
+      console.error('Error guardando proyecto:', error);
+      notify('No se pudo guardar el proyecto', 'error');
     }
   });
 }
@@ -682,6 +848,16 @@ function renderProjectDetail(id, tab = 'info') {
       ${content}
     </div>
   `);
+
+  // Si el usuario quiere URLs compactas, reemplazamos la URL visible para ocultar el ID
+  try {
+    if (String(localStorage.getItem('aurea_compact_urls')) === 'true') {
+      const shortHash = '#/projects' + (tab ? `/${tab}` : '');
+      history.replaceState(null, '', window.location.pathname + window.location.search + shortHash);
+    }
+  } catch (e) {
+    console.warn('No se pudo compactar la URL del proyecto:', e);
+  }
 }
 
 function renderTabInfo(p) {
@@ -907,6 +1083,12 @@ function renderBudgetForm(projectId, budgetId) {
             <div>
               <p class="text-sm font-semibold text-green-800">Presupuesto ${budget.status === 'aprobado-total' ? 'Totalmente Aprobado' : 'Parcialmente Aprobado'}</p>
               <p class="text-xs text-green-600">Este presupuesto está aprobado${existingProject ? ' y tiene un proyecto asociado' : ''}. Los cambios se reflejarán en el proyecto.</p>
+              ${(() => {
+                const admKey = (budget?.administration || existingProject?.administration || 'ARG');
+                if (admKey === 'PERU') return `<p class="text-xs text-gray-500 mt-1">+ IGV</p>`;
+                if (admKey === 'ARG') return `<p class="text-xs text-gray-500 mt-1">+ IVA</p>`;
+                return '';
+              })()}
               ${existingProject ? `<a onclick="navigate('#/projects/${existingProject.id}')" class="text-xs text-green-700 font-semibold underline cursor-pointer mt-1 inline-block">Ver proyecto →</a>` : ''}
             </div>
           </div>
@@ -1455,66 +1637,76 @@ window.showApprovalModal = async function(budgetId) {
       budget.items = budget.items.map(it => ({ ...it, aprobado: true }));
     }
 
-    const now = new Date();
-    const history = budget.history || [];
-    history.push({
-      action: approvalType === 'aprobado-total' ? 'Presupuesto Aprobado Totalmente' : 'Presupuesto Aprobado Parcialmente',
-      date: today(),
-      time: now.toLocaleTimeString('es-AR'),
-      notes: approvalNotes || ''
-    });
+    try {
+      const now = new Date();
+      const history = budget.history || [];
+      history.push({
+        action: approvalType === 'aprobado-total' ? 'Presupuesto Aprobado Totalmente' : 'Presupuesto Aprobado Parcialmente',
+        date: today(),
+        time: now.toLocaleTimeString('es-AR'),
+        notes: approvalNotes || ''
+      });
 
-    // Create new project from budget
-    const budgetAdministration = budget.administration || 'ARG';
-    const budgetIvaMode = budgetAdministration === 'PERU' ? 'con' : (budgetAdministration === 'ARG' && budget.iva === 'con' ? 'con' : 'sin');
-    const approvedAmount = approvalType === 'aprobado-total' ? calcBudgetTotal(budget.items, budgetAdministration, budgetIvaMode) : calcApprovedTotal(budget.items, budgetAdministration, budgetIvaMode);
-    const projNum = DB.nextNumber('projectCounter');
-    const newProject = await DB.add('projects', {
-      name: budget.projectName,
-      client: budget.clientName,
-      administration: budget.administration,
-      status: 'aprobado',
-      date: today(),
-      budgetId: budgetId,
-      budgetAmount: approvedAmount,
-      number: projNum
-    });
+      // Create new project from budget
+      const budgetAdministration = budget.administration || 'ARG';
+      const budgetIvaMode = budgetAdministration === 'PERU' ? 'con' : (budgetAdministration === 'ARG' && budget.iva === 'con' ? 'con' : 'sin');
+      const approvedAmount = approvalType === 'aprobado-total' ? calcBudgetTotal(budget.items, budgetAdministration, budgetIvaMode) : calcApprovedTotal(budget.items, budgetAdministration, budgetIvaMode);
+      const projNum = await DB.nextNumber('projectCounter');
+      console.log('Aprobando presupuesto', budgetId, '=> crear proyecto con cantidad aprobada', approvedAmount);
+      const newProject = await DB.add('projects', {
+        name: budget.projectName || `Proyecto desde ${formatBudgetRef(budget.number ?? budget.budgetNumber ?? '')}`,
+        client: budget.clientName || '',
+        administration: budget.administration || 'ARG',
+        status: 'aprobado',
+        date: today(),
+        budgetId: budgetId,
+        budgetAmount: approvedAmount,
+        number: projNum
+      });
 
-    // Automatically create income entry for approved amount
-    const bref = formatBudgetRef(budget.number ?? budget.budgetNumber ?? '');
-    const incomeDescription = approvalType === 'aprobado-total' 
-      ? `Presupuesto aprobado totalmente - ${bref}` 
-      : `Presupuesto aprobado parcialmente - ${bref}`;
-    
-    await DB.add('incomes', {
-      projectId: newProject.id,
-      budgetId: budgetId,
-      date: budget.date || today(),
-      description: incomeDescription,
-      amount: approvedAmount,
-    });
+      if (!newProject || !newProject.id) {
+        throw new Error('No se pudo crear el proyecto (DB.add devolvió valor inválido)');
+      }
 
-    // Link budget to project
-    await DB.update('budgets', budgetId, { 
-      status: approvalType,
-      items: budget.items,
-      history,
-      projectId: newProject.id
-    });
+      // Automatically create income entry for approved amount
+      const bref = formatBudgetRef(budget.number ?? budget.budgetNumber ?? '');
+      const incomeDescription = approvalType === 'aprobado-total' 
+        ? `Presupuesto aprobado totalmente - ${bref}` 
+        : `Presupuesto aprobado parcialmente - ${bref}`;
+      
+      await DB.add('incomes', {
+        projectId: newProject.id,
+        budgetId: budgetId,
+        date: budget.date || today(),
+        description: incomeDescription,
+        amount: approvedAmount,
+      });
 
-    let invoiceCreated = null;
-    if (budget.administration === 'USA') {
-      invoiceCreated = await createInvoiceFromBudget(budgetId);
+      // Link budget to project
+      await DB.update('budgets', budgetId, { 
+        status: approvalType,
+        items: budget.items,
+        history,
+        projectId: newProject.id
+      });
+
+      let invoiceCreated = null;
+      if (budget.administration === 'USA') {
+        try { invoiceCreated = await createInvoiceFromBudget(budgetId); } catch (e) { console.error('No se pudo crear factura automática:', e); }
+      }
+
+      if (invoiceCreated) {
+        notify('Presupuesto aprobado y factura creada', 'success');
+        navigate(`#/projects/${newProject.id}/invoices/${invoiceCreated.id}`);
+        return;
+      }
+
+      notify('Presupuesto aprobado y proyecto creado', 'success');
+      navigate('#/projects/' + newProject.id);
+    } catch (err) {
+      console.error('Error durante aprobación de presupuesto:', err);
+      notify(err.message || 'No se pudo aprobar el presupuesto', 'error');
     }
-
-    if (invoiceCreated) {
-      notify('Presupuesto aprobado y factura creada', 'success');
-      navigate(`#/projects/${newProject.id}/invoices/${invoiceCreated.id}`);
-      return;
-    }
-
-    notify('Presupuesto aprobado y proyecto creado', 'success');
-    navigate('#/projects/' + newProject.id);
   }
 };
 
@@ -1541,7 +1733,7 @@ window.createInvoiceFromBudget = async function(budgetId) {
   // Ensure project exists (create if missing)
   let project = budget.projectId ? DB.get('projects', budget.projectId) : null;
   if (!project) {
-    const projNum = DB.nextNumber('projectCounter');
+    const projNum = await DB.nextNumber('projectCounter');
     project = await DB.add('projects', {
       name: budget.projectName || `Proyecto desde ${formatBudgetRef(budget.number ?? budget.budgetNumber ?? '')}`,
       client: budget.clientName,
@@ -1557,7 +1749,8 @@ window.createInvoiceFromBudget = async function(budgetId) {
 
   // Build invoice data from budget
   const items = (budget.items || []).map(it => ({ description: it.description, qty: it.qty, unitPrice: it.unitPrice }));
-  const num = DB.nextNumber('invoiceCounter');
+  // For US invoices, use the budget-style number (yymmddNNN) so invoice numbers match budgets
+  const num = (budget.administration === 'USA') ? await DB.nextBudgetNumber() : await DB.nextNumber('invoiceCounter');
   const inv = await DB.add('invoices', {
     budgetId: budgetId,
     projectId: project.id,
@@ -1589,100 +1782,107 @@ window.createInvoiceFromBudget = async function(budgetId) {
  * - Común: date, status, notes, items, total, history
  */
 window.saveBudgetForm = async function(projectId, budgetId) {
-  const date = document.getElementById('b-date')?.value || today();
-  const status = document.getElementById('b-status')?.value || 'borrador';
-  const notes = document.getElementById('b-notes')?.value || '';
-  const items = (window._liItems || []).filter(it => it.description || it.unitPrice);
-  const administration = document.getElementById('b-admin')?.value || (budgetId ? DB.get('budgets', budgetId)?.administration : 'ARG') || 'ARG';
-  const ivaMode = administration === 'PERU' ? 'con' : (administration === 'ARG' && document.getElementById('b-iva-con')?.checked ? 'con' : 'sin');
-  const total = calcBudgetTotal(items, administration, ivaMode);
+  try {
+    const date = document.getElementById('b-date')?.value || today();
+    const status = document.getElementById('b-status')?.value || 'borrador';
+    const notes = document.getElementById('b-notes')?.value || '';
+    const items = (window._liItems || []).filter(it => it.description || it.unitPrice);
+    const administration = document.getElementById('b-admin')?.value || (budgetId ? DB.get('budgets', budgetId)?.administration : 'ARG') || 'ARG';
+    const ivaMode = administration === 'PERU' ? 'con' : (administration === 'ARG' && document.getElementById('b-iva-con')?.checked ? 'con' : 'sin');
+    const total = calcBudgetTotal(items, administration, ivaMode);
 
-  if (!items.length) { notify('Agregá al menos un ítem', 'warning'); return; }
+    if (!items.length) { notify('Agregá al menos un ítem', 'warning'); return; }
 
-  let data = { date, status, notes, items, total, administration };
+    notify('Guardando presupuesto...', 'info');
 
-  // Check if this budget has an associated project (either from parameter or previously approved)
-  const hasAssociatedProject = !!projectId || window._budgetHasProject;
+    let data = { date, status, notes, items, total, administration };
 
-  // Si no hay proyecto asociado, necesitamos los datos del presupuesto
-  if (!hasAssociatedProject) {
-    const projectName = document.getElementById('b-project-name')?.value.trim();
-    const clientName = document.getElementById('b-client')?.value.trim();
-    const administration = document.getElementById('b-admin')?.value;
+    // Check if this budget has an associated project (either from parameter or previously approved)
+    const hasAssociatedProject = !!projectId || window._budgetHasProject;
 
-    if (!projectName) { notify('El nombre del proyecto es obligatorio', 'warning'); return; }
-    if (!clientName) { notify('El nombre del cliente es obligatorio', 'warning'); return; }
+    // Si no hay proyecto asociado, necesitamos los datos del presupuesto
+    if (!hasAssociatedProject) {
+      const projectName = document.getElementById('b-project-name')?.value.trim();
+      const clientName = document.getElementById('b-client')?.value.trim();
+      const administration = document.getElementById('b-admin')?.value;
 
-    data.projectName = projectName;
-    data.clientName = clientName;
-    data.administration = administration;
-    data.total = calcBudgetTotal(items, administration, ivaMode);
-  } else if (projectId) {
-    data.projectId = projectId;
-  }
-  
-  // Keep existing projectId if budget was already approved
-  if (budgetId) {
-    const existingBudget = DB.get('budgets', budgetId);
-    if (existingBudget?.projectId) {
-      data.projectId = existingBudget.projectId;
+      if (!projectName) { notify('El nombre del proyecto es obligatorio', 'warning'); return; }
+      if (!clientName) { notify('El nombre del cliente es obligatorio', 'warning'); return; }
+
+      data.projectName = projectName;
+      data.clientName = clientName;
+      data.administration = administration;
+      data.total = calcBudgetTotal(items, administration, ivaMode);
+    } else if (projectId) {
+      data.projectId = projectId;
     }
-  }
-
-  if (budgetId) {
-    const existingBudget = DB.get('budgets', budgetId);
-    const history = existingBudget?.history || [];
     
-    // Add history entry for edits
-    const now = new Date();
-    const oldStatus = existingBudget?.status || 'borrador';
-    if (oldStatus !== status) {
-      history.push({
-        action: `Estado cambiado: ${BUDGET_STATUS[oldStatus]?.label || oldStatus} → ${BUDGET_STATUS[status]?.label || status}`,
-        date: today(),
-        time: now.toLocaleTimeString('es-AR'),
-        notes: ''
-      });
+    // Keep existing projectId if budget was already approved
+    if (budgetId) {
+      const existingBudget = DB.get('budgets', budgetId);
+      if (existingBudget?.projectId) {
+        data.projectId = existingBudget.projectId;
+      }
+    }
+
+    if (budgetId) {
+      const existingBudget = DB.get('budgets', budgetId);
+      const history = existingBudget?.history || [];
+      
+      // Add history entry for edits
+      const now = new Date();
+      const oldStatus = existingBudget?.status || 'borrador';
+      if (oldStatus !== status) {
+        history.push({
+          action: `Estado cambiado: ${BUDGET_STATUS[oldStatus]?.label || oldStatus} → ${BUDGET_STATUS[status]?.label || status}`,
+          date: today(),
+          time: now.toLocaleTimeString('es-AR'),
+          notes: ''
+        });
+      } else {
+        history.push({
+          action: 'Presupuesto modificado',
+          date: today(),
+          time: now.toLocaleTimeString('es-AR'),
+          notes: 'Cambios guardados'
+        });
+      }
+      
+      data.history = history;
+      // Capture IVA selection (ARG only UI shows it)
+      const ivaCon = document.getElementById('b-iva-con');
+      const ivaSin = document.getElementById('b-iva-sin');
+      if (administration === 'PERU') data.iva = 'con';
+      else if (ivaCon?.checked) data.iva = 'con';
+      else if (ivaSin?.checked) data.iva = 'sin';
+      else data.iva = undefined;
+      await DB.update('budgets', budgetId, data);
+      notify('Presupuesto guardado');
+      navigate('#/presupuestos');
     } else {
-      history.push({
-        action: 'Presupuesto modificado',
+      const num = await callMaybeAsync(DB.nextBudgetNumber.bind(DB));
+      const now = new Date();
+      data.number = num;
+      data.history = [{
+        action: 'Presupuesto creado',
         date: today(),
         time: now.toLocaleTimeString('es-AR'),
-        notes: 'Cambios guardados'
-      });
+        notes: 'Presupuesto inicial'
+      }];
+      // Capture IVA selection for newly created budgets
+      const ivaConNew = document.getElementById('b-iva-con');
+      const ivaSinNew = document.getElementById('b-iva-sin');
+      if (administration === 'PERU') data.iva = 'con';
+      else if (ivaConNew?.checked) data.iva = 'con';
+      else if (ivaSinNew?.checked) data.iva = 'sin';
+      else data.iva = undefined;
+      const newBudget = await DB.add('budgets', data);
+      notify('Presupuesto creado exitosamente');
+      navigate('#/presupuestos/' + newBudget.id);
     }
-    
-    data.history = history;
-    // Capture IVA selection (ARG only UI shows it)
-    const ivaCon = document.getElementById('b-iva-con');
-    const ivaSin = document.getElementById('b-iva-sin');
-    if (administration === 'PERU') data.iva = 'con';
-    else if (ivaCon?.checked) data.iva = 'con';
-    else if (ivaSin?.checked) data.iva = 'sin';
-    else data.iva = undefined;
-    DB.update('budgets', budgetId, data);
-    notify('Presupuesto guardado');
-    navigate('#/presupuestos');
-  } else {
-    const num = await callMaybeAsync(DB.nextBudgetNumber.bind(DB));
-    const now = new Date();
-    data.number = num;
-    data.history = [{
-      action: 'Presupuesto creado',
-      date: today(),
-      time: now.toLocaleTimeString('es-AR'),
-      notes: 'Presupuesto inicial'
-    }];
-    // Capture IVA selection for newly created budgets
-    const ivaConNew = document.getElementById('b-iva-con');
-    const ivaSinNew = document.getElementById('b-iva-sin');
-    if (administration === 'PERU') data.iva = 'con';
-    else if (ivaConNew?.checked) data.iva = 'con';
-    else if (ivaSinNew?.checked) data.iva = 'sin';
-    else data.iva = undefined;
-    const newBudget = DB.add('budgets', data);
-    notify('Presupuesto creado exitosamente');
-    navigate('#/presupuestos/' + newBudget.id);
+  } catch (error) {
+    console.error('Error guardando presupuesto:', error);
+    notify(error.message || 'No se pudo guardar el presupuesto', 'error');
   }
 };
 
@@ -1698,7 +1898,7 @@ window.approveBudget = async function(budgetId, projectId) {
       notify('Este presupuesto ya tiene un proyecto asociado', 'info');
       return;
     }
-    const projNum = DB.nextNumber('projectCounter');
+    const projNum = await DB.nextNumber('projectCounter');
     project = await DB.add('projects', {
       name: budget.projectName || `Proyecto desde ${formatBudgetRef(budget.number ?? budget.budgetNumber ?? '')}`,
       client: budget.clientName,
@@ -1808,12 +2008,26 @@ function renderTabOperations(project) {
         ['Total Ingresos', fin.totalIncome, 'text-green-600'],
         ['Total Gastos', fin.totalExpense, 'text-red-600'],
         ['Ganancia', fin.profit, fin.profit >= 0 ? 'text-green-600' : 'text-red-600'],
-      ].map(([l,v,c]) => `
-        <div class="kpi-card text-center">
-          <p class="text-xs text-gray-400 mb-1">${l}</p>
-          <p class="text-lg font-bold ${c}">${fmtCurrency(v, project.administration)}</p>
-        </div>
-      `).join('')}
+      ].map(([l,v,c]) => {
+        // For "Presupuesto Aprobado" show secondary tax note depending on administration
+        let extra = '';
+        if (l === 'Presupuesto Aprobado') {
+          if (project.administration === 'PERU') extra = '<div class="text-xs text-gray-400 mt-1">+ IGV</div>';
+          else if (project.administration === 'ARG') extra = '<div class="text-xs text-gray-400 mt-1">+ IVA</div>';
+        }
+        // For Total Ingresos show bruto in parentheses for taxed administrations
+        let valueHtml = `<p class="text-lg font-bold ${c}">${fmtCurrency(v, project.administration)}</p>`;
+        if (l === 'Total Ingresos' && (project.administration === 'PERU' || project.administration === 'ARG')) {
+          const bruto = fin.totalIncomeGross || v;
+          valueHtml = `<p class="text-lg font-bold ${c}">${fmtCurrency(v, project.administration)} <span class="text-sm text-gray-500">(bruto ${fmtCurrency(bruto, project.administration)})</span></p>`;
+        }
+        return `
+          <div class="kpi-card text-center">
+            <p class="text-xs text-gray-400 mb-1">${l}${extra}</p>
+            ${valueHtml}
+          </div>
+        `;
+      }).join('')}
     </div>
 
     <!-- Gastos -->
@@ -1885,11 +2099,21 @@ window.showExpenseModal = function(projectId, expenseId) {
       if (isNaN(amount) || amount <= 0) { Swal.showValidationMessage('Importe inválido'); return false; }
       return { projectId, date: document.getElementById('ef-date').value, category: document.getElementById('ef-cat').value, description: desc, amount, notes: document.getElementById('ef-notes').value };
     }
-  }).then(r => {
+  }).then(async r => {
     if (!r.isConfirmed) return;
-    if (expenseId) { DB.update('expenses', expenseId, r.value); notify('Gasto actualizado'); }
-    else { DB.add('expenses', r.value); notify('Gasto registrado'); }
-    renderProjectDetail(projectId, 'operations');
+    try {
+      if (expenseId) {
+        await DB.update('expenses', expenseId, r.value);
+        notify('Gasto actualizado');
+      } else {
+        await DB.add('expenses', r.value);
+        notify('Gasto registrado');
+      }
+      renderProjectDetail(projectId, 'operations');
+    } catch (error) {
+      console.error('Error guardando gasto:', error);
+      notify('No se pudo guardar el gasto', 'error');
+    }
   });
 };
 
@@ -1922,11 +2146,21 @@ window.showIncomeModal = function(projectId, incomeId) {
       if (isNaN(amount) || amount <= 0) { Swal.showValidationMessage('Importe inválido'); return false; }
       return { projectId, date: document.getElementById('if-date').value, description: desc, amount };
     }
-  }).then(r => {
+  }).then(async r => {
     if (!r.isConfirmed) return;
-    if (incomeId) { DB.update('incomes', incomeId, r.value); notify('Ingreso actualizado'); }
-    else { DB.add('incomes', r.value); notify('Ingreso registrado'); }
-    renderProjectDetail(projectId, 'operations');
+    try {
+      if (incomeId) {
+        await DB.update('incomes', incomeId, r.value);
+        notify('Ingreso actualizado');
+      } else {
+        await DB.add('incomes', r.value);
+        notify('Ingreso registrado');
+      }
+      renderProjectDetail(projectId, 'operations');
+    } catch (error) {
+      console.error('Error guardando ingreso:', error);
+      notify('No se pudo guardar el ingreso', 'error');
+    }
   });
 };
 
@@ -1952,7 +2186,7 @@ function ensureInvoicesFromApprovedBudgets(project) {
 
   approvedBudgets.forEach(budget => {
     const items = (budget.items || []).map(it => ({ description: it.description, qty: it.qty, unitPrice: it.unitPrice }));
-    const num = DB.nextNumber('invoiceCounter');
+    const num = (project.administration === 'USA') ? DB.nextBudgetNumber() : DB.nextNumber('invoiceCounter');
     DB.add('invoices', {
       budgetId: budget.id,
       projectId: project.id,
@@ -2181,7 +2415,7 @@ function renderInvoiceForm(projectId, invoiceId) {
   };
 }
 
-window.saveInvoiceForm = function(projectId, invoiceId) {
+window.saveInvoiceForm = async function(projectId, invoiceId) {
   const project = DB.get('projects', projectId);
   if (!project || !canGenerateInvoicesForProject(project)) {
     notify('Solo la administración United States puede generar facturas.', 'error');
@@ -2199,7 +2433,8 @@ window.saveInvoiceForm = function(projectId, invoiceId) {
     items, total: calcBudgetTotal(items),
   };
   if (invoiceId) {
-    DB.update('invoices', invoiceId, data); notify('Factura actualizada');
+    await DB.update('invoices', invoiceId, data);
+    notify('Factura actualizada');
   } else {
     // Para facturas USA, reutilizar número de presupuesto aprobado si existe
     let num;
@@ -2207,8 +2442,8 @@ window.saveInvoiceForm = function(projectId, invoiceId) {
       const activeBudget = DB.getActiveBudget(projectId);
       num = activeBudget?.number ?? activeBudget?.budgetNumber ?? null;
     }
-    if (!num) num = DB.nextNumber('invoiceCounter');
-    DB.add('invoices', { ...data, number: num, invoiceNumber: (typeof num === 'string' ? num : undefined) });
+    if (!num) num = (project?.administration === 'USA') ? await DB.nextBudgetNumber() : await DB.nextNumber('invoiceCounter');
+    await DB.add('invoices', { ...data, number: num, invoiceNumber: (typeof num === 'string' ? num : undefined) });
     notify('Factura creada');
   }
   navigate(`#/projects/${projectId}/invoices`);
@@ -2232,7 +2467,11 @@ function renderTracker() {
     </button>
   `);
 
-  const budgets = DB.getAll('budgets').sort((a,b) => b.createdAt > a.createdAt ? 1:-1);
+  const budgets = DB.getAll('budgets').sort((a, b) => {
+    const ta = a && (a.date ? new Date(a.date).getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0));
+    const tb = b && (b.date ? new Date(b.date).getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0));
+    return (tb || 0) - (ta || 0);
+  });
   const clients = [...new Set(budgets.map(b => b.clientName).filter(Boolean))].sort();
 
   const rows = budgets.map(b => {
@@ -2242,15 +2481,15 @@ function renderTracker() {
     const ref = refRaw === '(sin número)' ? refRaw : formatBudgetRef(refRaw);
     
     return `<tr class="b-row cursor-pointer hover:bg-gray-50" data-status="${b.status}" data-admin="${b.administration||''}" data-client="${esc(b.clientName||'')}" onclick="navigate('#/presupuestos/${b.id}')">
-      <td class="font-medium text-gray-900">${ref}</td>
+      <td class="font-medium text-gray-900 nowrap-cell">${ref}</td>
       <td>
         <span class="font-semibold text-gray-900">${esc(b.projectName||'—')}</span>
         ${project ? `<span class="text-xs text-gray-400 ml-2">(Proyecto aprobado)</span>` : ''}
       </td>
       <td class="text-gray-600">${esc(b.clientName||'—')}</td>
-      <td>${b.administration ? adminBadge(b.administration) : '—'}</td>
+      <td class="nowrap-cell">${b.administration ? adminBadge(b.administration) : '—'}</td>
       <td>${badge(b.status, BUDGET_STATUS)}</td>
-      <td class="font-semibold text-gray-900">${fmtCurrency(total, b.administration||'ARG')}</td>
+      <td class="font-semibold text-gray-900 nowrap-cell">${fmtCurrency(total, b.administration||'ARG')}</td>
       <td class="text-gray-400">${fmtDate(b.date)}</td>
       <td onclick="event.stopPropagation()">
         <div class="flex gap-2">
@@ -2395,16 +2634,21 @@ function renderAdministraciones() {
   setActions('');
 
   const cards = Object.entries(ADMIN).map(([key, a]) => {
-  const allProjects = DB.getAll('projects').filter(p => p.administration === key);
-  const pendingProjects = allProjects.filter(p => p.status === 'pendiente');
-  const approvedProjects = allProjects.filter(p => p.status === 'aprobado');
-  const totalProjects = allProjects.length;
-  const approvedAmount = approvedProjects.reduce((sum, project) => sum + (Number(project.budgetAmount) || 0), 0);
-    
-    // Calculate earnings (only incomes, not expenses)
-    const operations = DB.getAll('operations').filter(o => o.administration === key);
-    const earnings = operations.filter(o => o.tipo === 'ingreso')
-      .reduce((sum, op) => sum + (Number(op.monto) || 0), 0);
+    const allProjects = DB.getAll('projects').filter(p => p.administration === key);
+    const pendingProjects = allProjects.filter(p => p.status === 'pendiente');
+    const approvedProjects = allProjects.filter(p => p.status === 'aprobado');
+    const totalProjects = allProjects.length;
+
+    // Ganancias/pérdidas reales por proyecto (mismo cálculo que la lista de proyectos).
+    let earnings = 0;
+    let approvedAmount = 0;
+    allProjects.forEach(p => {
+      try {
+        const fin = DB.getProjectFinancials(p.id);
+        earnings += Number(fin.profit || 0) || 0;
+        if (p.status === 'aprobado') approvedAmount += Number(fin.budgetTotal || 0) || 0;
+      } catch (e) { /* ignore */ }
+    });
     
     return `
       <div class="kpi-card border-2 hover:shadow-lg transition-shadow" style="border-color: ${a.flagColor}30">
@@ -2535,6 +2779,15 @@ function renderSettings(section = 'company') {
   if (section === 'demo') body = renderDemoDataSettings();
 
   setContent(`<div class="max-w-3xl mx-auto">${tabs}${body}</div>`);
+  // Populate session fields if present
+  try {
+    const enabled = String(localStorage.getItem('aurea_enable_inactivity_watch')) === 'true';
+    document.getElementById('session-enable-watch').checked = !!enabled;
+    const timeoutMs = Number(localStorage.getItem('aurea_inactivity_timeout_ms')) || (15 * 60 * 1000);
+    document.getElementById('session-timeout-min').value = Math.round(timeoutMs / 60000);
+    const countdown = Number(localStorage.getItem('aurea_expire_countdown_s')) || 8;
+    document.getElementById('session-countdown-s').value = countdown;
+  } catch (e) { /* ignore if elements not present */ }
 }
 
 function renderSecuritySettings() {
@@ -2578,6 +2831,35 @@ function renderSecuritySettings() {
       <div class="mt-8 pt-5 border-t border-gray-200 text-sm text-gray-500 leading-relaxed">
         Aurea no guarda la contraseña en texto plano. En producción la credencial se administra mediante Firebase Authentication.
       </div>
+  
+      <div class="mt-8 pt-6 border-t border-gray-200">
+        <h4 class="text-lg font-semibold text-gray-900 mb-3">Sesión e Inactividad</h4>
+        <div class="space-y-4">
+          <div>
+            <label class="flex items-center gap-3">
+              <input id="session-enable-watch" type="checkbox" style="width:18px;height:18px" />
+              <span class="text-sm text-gray-700">Habilitar cierre automático por inactividad</span>
+            </label>
+          </div>
+
+          <div class="grid grid-cols-2 gap-4 items-center">
+            <div>
+              <label class="block text-sm text-gray-600">Tiempo de inactividad (min)</label>
+              <input id="session-timeout-min" type="number" min="1" class="form-input" style="width:120px;" />
+            </div>
+            <div>
+              <label class="block text-sm text-gray-600">Contador modal (s)</label>
+              <input id="session-countdown-s" type="number" min="3" class="form-input" style="width:120px;" />
+            </div>
+          </div>
+
+          <div class="text-sm text-gray-500">Nota: Firebase además usa persistencia de sesión (SESSION), por lo que cerrar el navegador también cierra la sesión.</div>
+
+          <div>
+            <button class="btn btn-primary btn-sm" onclick="saveSessionSettings()">Guardar ajustes de sesión</button>
+          </div>
+        </div>
+      </div>
     </div>
   `;
 }
@@ -2608,13 +2890,40 @@ window.saveSecurityPin = async function() {
     document.getElementById('security-current-pin').value = '';
     document.getElementById('security-new-pin').value = '';
     document.getElementById('security-confirm-pin').value = '';
+      // Refrescar la pestaña de seguridad para mostrar cambios inmediatos
+      try { renderSettings('security'); } catch (e) { /* ignore */ }
   } catch (error) {
     notify(error.message || 'No se pudo cambiar el PIN', 'error');
   }
 };
 
 function renderCompanySettings() {
-  const cfg = DB.getConfig() || {};
+  const cfg = DB.getConfig();
+  // Si la config aún no llegó (modo Firebase), mostrar estado de carga y reintentar al recibir datos
+  if (cfg === null) {
+    setContent(`
+      <div class="max-w-3xl mx-auto">
+        <div class="bg-white border border-gray-200 rounded-2xl p-6 text-center">
+          <div class="spinner mx-auto" style="width:36px;height:36px;border-width:3px;margin-bottom:12px"></div>
+          <div class="text-gray-600">Cargando configuración de la empresa...</div>
+        </div>
+      </div>
+    `);
+
+    // Esperar evento de actualización desde DB
+    const onUpdate = (ev) => {
+      try {
+        if (ev?.detail?.collection === 'config') {
+          window.removeEventListener('db-updated', onUpdate);
+          // Re-renderizar cuando ya tengamos la config
+          renderCompanySettings();
+        }
+      } catch (e) { /* ignore */ }
+    };
+    window.addEventListener('db-updated', onUpdate);
+    return;
+  }
+
   const c = cfg.company || {};
   return `
     <div class="bg-white border border-gray-200 rounded-2xl p-6">
@@ -2689,6 +2998,8 @@ window.saveCompanySettings = function() {
   };
   DB.setConfig(cfg);
   notify('Configuración guardada');
+  // Refrescar la pestaña de empresa para reflejar los cambios inmediatamente
+  try { renderSettings('company'); } catch (e) { /* ignore */ }
 };
 
 function renderClientSettings() {
@@ -2751,26 +3062,37 @@ window.showClientModal = function(id, callback) {
         address: document.getElementById('cl-address').value,
       };
     }
-  }).then(r => {
+  }).then(async r => {
     if (!r.isConfirmed) return;
     let savedClient = null;
-    if (id) {
-      DB.update('clients', id, r.value);
-      notify('Cliente actualizado');
-      savedClient = { ...r.value, id };
-    } else {
-      savedClient = DB.add('clients', r.value);
-      notify('Cliente creado');
+    try {
+      if (id) {
+        await DB.update('clients', id, r.value);
+        savedClient = { ...r.value, id };
+        notify('Cliente actualizado');
+      } else {
+        savedClient = await DB.add('clients', r.value);
+        notify('Cliente creado');
+      }
+      if (typeof callback === 'function') callback(savedClient);
+      renderSettings('clients');
+    } catch (error) {
+      console.error('Error guardando cliente:', error);
+      notify('No se pudo guardar el cliente', 'error');
     }
-    if (typeof callback === 'function') callback(savedClient);
-    renderSettings('clients');
   });
 };
 
 async function deleteClient(id, name) {
   if (!await confirmDelete(name)) return;
-  DB.remove('clients', id); notify('Cliente eliminado', 'info');
-  renderSettings('clients');
+  try {
+    await DB.remove('clients', id);
+    notify('Cliente eliminado', 'info');
+    renderSettings('clients');
+  } catch (error) {
+    console.error('Error eliminando cliente:', error);
+    notify('No se pudo eliminar el cliente', 'error');
+  }
 }
 
 function renderCategorySettings() {
@@ -2925,6 +3247,7 @@ function renderDemoDataSettings() {
             </ul>
           </div>
           
+          <div class="grid grid-cols-2 gap-3">
           <button 
             id="load-demo-btn"
             class="btn btn-primary w-full"
@@ -2935,6 +3258,8 @@ function renderDemoDataSettings() {
             </svg>
             Cargar Datos de Ejemplo
           </button>
+          <button id="clear-demo-btn" class="btn btn-secondary w-full" onclick="clearDemoDataWithConfirm()">Limpiar datos de ejemplo</button>
+          </div>
           
           <p class="text-xs text-gray-500 text-center mt-3">
             💡 Ver <a href="#" class="text-brand-500 hover:underline" onclick="event.preventDefault(); window.open('DATOS-EJEMPLO.md')">DATOS-EJEMPLO.md</a> para más detalles
@@ -2983,6 +3308,33 @@ window.loadDemoDataWithConfirm = async function() {
       </svg>
       Cargar Datos de Ejemplo
     `;
+  }
+};
+
+window.clearDemoDataWithConfirm = async function() {
+  if (!confirm('¿Querés eliminar los datos de ejemplo? Esto borra sólo los registros marcados como datos de muestra.')) return;
+  const btn = document.getElementById('clear-demo-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = 'Limpiando...';
+  }
+  try {
+    if (typeof window.eliminarDatosDeMuestra === 'function') {
+      await window.eliminarDatosDeMuestra();
+      notify('Datos de ejemplo eliminados', 'success');
+    } else {
+      throw new Error('eliminarDatosDeMuestra no disponible');
+    }
+  } catch (e) {
+    console.error('Error limpiando datos de muestra:', e);
+    notify('Error limpiando datos de muestra: ' + (e.message || e), 'error');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = 'Limpiar datos de ejemplo';
+    }
+    // Forzar re-render de settings
+    renderSettings('demo');
   }
 };
 

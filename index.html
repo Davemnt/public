@@ -4,6 +4,19 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Aurea — Gestión de Proyectos</title>
+  <!-- Favicons: coloca los archivos en la raíz del proyecto (favicon.ico, favicon-32.png, apple-touch-icon.png, site.webmanifest) -->
+  <!-- Use the provided favicon.png for all platforms when specific sizes are not available -->
+  <link rel="icon" href="image/favicon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="image/favicon.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="image/favicon.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="image/favicon.png">
+  <link rel="manifest" href="image/site.webmanifest">
+  <link rel="shortcut icon" href="image/favicon.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="image/favicon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Aurea">
+  <meta name="theme-color" content="#de591f">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <!-- Tailwind CSS & Libraries -->
@@ -125,6 +138,8 @@
     .data-table tr:last-child td { border-bottom: none; }
     .data-table tr:hover td { background: #fafafa; }
     .table-wrap { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; overflow: hidden; }
+    /* Allow horizontal scrolling on small screens */
+    .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 
     /* Badges */
     .badge { display: inline-flex; align-items: center; padding: 3px 10px;
@@ -198,6 +213,16 @@
       border-color: var(--c-brand);
       box-shadow: 0 0 0 3px rgba(222,89,31,0.08);
     }
+    /* Ensure certain table cells don't wrap (Número, Administración, Total) */
+    .nowrap-cell { white-space: nowrap; }
+    .admin-badge { display: inline-flex; align-items: center; }
+    @media (max-width: 640px) {
+      /* Keep number, administration and total in one line on mobile */
+      .nowrap-cell { white-space: nowrap; font-size: 13px; }
+      .data-table td.nowrap-cell { padding-right: 8px; }
+      .admin-badge { padding: 3px 8px; font-size: 12px; }
+      .data-table td { padding: 8px 10px; }
+    }
     .li-desc[contenteditable="false"] { background:#f8fafc; color:#64748b; }
     /* Placeholder for contenteditable */
     .li-desc[data-placeholder]:empty:before {
@@ -223,6 +248,52 @@
       #sidebar-overlay.show { display: block; }
       #main-wrapper { margin-left: 0 !important; }
     }
+
+    /* Small screens adjustments */
+    @media (max-width: 640px) {
+      body { font-size: 14px; }
+      .kpi-card { padding: 12px; border-radius: 10px; }
+      .kpi-card p.text-2xl { font-size: 20px !important; }
+      .nav-item { padding: 10px 12px; font-size: 13px; }
+      .data-table th, .data-table td { padding: 8px 10px; font-size: 13px; }
+      .tab-bar { overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
+      .tab-btn { display: inline-block; padding: 8px 12px; font-size: 13px; }
+      .btn { padding: 8px 12px; font-size: 13px; }
+      .btn-sm { padding: 7px 10px; font-size: 12px; }
+      .form-input, .form-select, .form-textarea { padding: 8px 10px; font-size: 14px; }
+      .li-desc { min-height: 36px; }
+      header .btn-sm { padding: 6px 8px; font-size: 12px; }
+      #main-content { padding: 12px; }
+      #sidebar { width: 220px; }
+      #main-wrapper { margin-left: 0 !important; }
+    }
+
+    @media (max-width: 420px) {
+      .kpi-card p.text-2xl { font-size: 18px !important; }
+      .badge { padding: 3px 8px; font-size: 11px; }
+      .nav-label { font-size: 10px; }
+      .empty-state { padding: 40px 10px; }
+      .data-table th, .data-table td { font-size: 12px; padding: 6px 8px; }
+      .tab-btn { padding: 6px 10px; font-size: 12px; }
+    }
+
+    /* Compact header and mobile bottom nav */
+    header { transition: height 0.15s ease, padding 0.15s ease; }
+    .header-compact { height: 48px !important; padding: 0 12px !important; }
+    .hide-on-mobile { display: inline-block; }
+    .show-only-mobile { display: none; }
+    @media (max-width: 640px) {
+      .hide-on-mobile { display: none !important; }
+      .show-only-mobile { display: inline-flex !important; }
+      #breadcrumb { font-size: 13px; }
+      #breadcrumb .font-semibold { display: none; }
+      #main-content { padding-bottom: 80px; }
+    }
+
+    .mobile-bottom-nav { display: none; position: fixed; left: 0; right: 0; bottom: 0; height: 60px; background: #fff; border-top: 1px solid #e5e7eb; z-index: 40; align-items: center; justify-content: space-around; }
+    .mobile-bottom-nav a { display: flex; flex-direction: column; align-items: center; justify-content: center; color: #475569; font-size: 12px; text-decoration: none; gap: 4px; }
+    .mobile-bottom-nav svg { width: 20px; height: 20px; }
+    @media (max-width: 640px) { .mobile-bottom-nav { display: flex; } }
 
     /* Empty state */
     .empty-state { text-align: center; padding: 60px 20px; color: #94a3b8; }
@@ -318,14 +389,14 @@
       <!-- Header actions -->
       <div class="flex items-center gap-2">
         <!-- Dynamic action buttons -->
-        <div id="header-actions"></div>
+        <div id="header-actions" class="hide-on-mobile"></div>
         
-        <!-- Logout Button (fixed) -->
+        <!-- Compact logout: icon only on mobile -->
         <button onclick="Auth.logout()" class="btn-sm btn-secondary flex items-center gap-2" title="Cerrar sesión">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
           </svg>
-          Cerrar sesión
+          <span class="hide-on-mobile">Cerrar sesión</span>
         </button>
       </div>
     </header>
@@ -349,17 +420,106 @@
       if (!user) {
         // No autenticado, redirigir a login inmediatamente
         window.location.replace('login.html');
-      } else {
-        // Autenticado, quitar loading y mostrar app
-        document.body.classList.remove('auth-loading');
-        
-        // Inicializar DB y cargar la app
-        DB.init().then(() => {
-          console.log('✅ App lista');
-        }).catch(err => {
-          console.error('❌ Error inicializando app:', err);
-        });
+        return;
       }
+
+      try {
+        // Si la última actividad es demasiado antigua, forzamos logout para evitar sesiones "pegadas"
+        const last = Number(sessionStorage.getItem('aurea_last_activity') || 0);
+        const timeout = Number(localStorage.getItem('aurea_inactivity_timeout_ms')) || (15 * 60 * 1000);
+        // Si no hay registro de última actividad (last === 0), lo interpretamos
+        // como sesión nueva y no mostramos el modal. Solo mostramos el aviso si
+        // existe un timestamp y la diferencia supera el timeout.
+        if (last && (Date.now() - last) > timeout) {
+          console.log('ℹ️ Sesión considerada inactiva al iniciar — mostrando aviso con contador');
+          const countdownSeconds = Number(localStorage.getItem('aurea_expire_countdown_s')) || 8;
+          let remaining = countdownSeconds;
+
+          Swal.fire({
+            title: 'Sesión expirada',
+            html: `<div style="text-align:left">Tu sesión parece haber expirado por inactividad.<br><strong>Redirigiendo en <span id="swal-countdown">${remaining}</span>s</strong></div>`,
+            icon: 'info',
+            showCancelButton: false,
+            showDenyButton: true,
+            denyButtonText: 'Cerrar sesión ahora',
+            confirmButtonText: 'Extender sesión',
+            allowOutsideClick: false,
+            allowEscapeKey: false,
+            didOpen: () => {
+              const el = document.getElementById('swal-countdown');
+              const iv = setInterval(() => {
+                try {
+                  remaining -= 1;
+                  if (el) el.textContent = String(remaining);
+                  if (remaining <= 0) {
+                    clearInterval(iv);
+                    Swal.close();
+                    Auth.logout();
+                  }
+                } catch (e) { clearInterval(iv); }
+              }, 1000);
+
+              // store interval id so we can clear it on actions
+              Swal._expireInterval = iv;
+            }
+          }).then((res) => {
+            try { if (Swal._expireInterval) clearInterval(Swal._expireInterval); } catch (e) {}
+            if (res.isConfirmed) {
+              // Extender sesión: actualizar última actividad y continuar
+              try { sessionStorage.setItem('aurea_last_activity', String(Date.now())); } catch (e) {}
+              // Quitar la pantalla de carga, habilitar watcher y continuar inicializando la app
+              document.body.classList.remove('auth-loading');
+              try {
+                // Asegurar valor por defecto visible en Configuración
+                if (!localStorage.getItem('aurea_inactivity_timeout_ms')) {
+                  localStorage.setItem('aurea_inactivity_timeout_ms', String(15 * 60 * 1000));
+                }
+                if (!localStorage.getItem('aurea_expire_countdown_s')) {
+                  localStorage.setItem('aurea_expire_countdown_s', '60');
+                }
+                if (!localStorage.getItem('aurea_enable_inactivity_watch')) {
+                  localStorage.setItem('aurea_enable_inactivity_watch', 'true');
+                }
+                if (typeof Auth !== 'undefined' && Auth.enableInactivityWatcher) Auth.enableInactivityWatcher();
+              } catch(e) {}
+              DB.init().then(() => {
+                console.log('✅ App lista (sesión extendida)');
+              }).catch(err => {
+                console.error('❌ Error inicializando app tras extender sesión:', err);
+              });
+            } else {
+              // Cerrar sesión ahora o dismiss
+              Auth.logout();
+            }
+          });
+
+          return;
+        }
+      } catch (e) {
+        console.warn('No se pudo validar última actividad:', e);
+      }
+
+      // Autenticado y con actividad reciente: quitar loading y mostrar app
+      document.body.classList.remove('auth-loading');
+      try {
+        // Asegurar valor por defecto visible en Configuración
+        if (!localStorage.getItem('aurea_inactivity_timeout_ms')) {
+          localStorage.setItem('aurea_inactivity_timeout_ms', String(15 * 60 * 1000));
+        }
+        if (!localStorage.getItem('aurea_expire_countdown_s')) {
+          localStorage.setItem('aurea_expire_countdown_s', '60');
+        }
+        if (!localStorage.getItem('aurea_enable_inactivity_watch')) {
+          localStorage.setItem('aurea_enable_inactivity_watch', 'true');
+        }
+        if (typeof Auth !== 'undefined' && Auth.enableInactivityWatcher) Auth.enableInactivityWatcher();
+      } catch(e) {}
+      // Inicializar DB y cargar la app
+      DB.init().then(() => {
+        console.log('✅ App lista');
+      }).catch(err => {
+        console.error('❌ Error inicializando app:', err);
+      });
     });
   </script>
   
@@ -367,5 +527,94 @@
   <script src="./db-firebase.js"></script>
   <script src="./app.js"></script>
   <script src="./datos-ejemplo.js"></script>
+  
+  <!-- Mobile bottom nav -->
+  <nav class="mobile-bottom-nav" role="navigation" aria-label="Navegación móvil">
+    <a href="#/" onclick="navigate('#/')">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+      <span>Inicio</span>
+    </a>
+    <a href="#/presupuestos" onclick="navigate('#/presupuestos')">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+      <span>Presup.</span>
+    </a>
+    <a href="#/projects" onclick="navigate('#/projects')">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7a2 2 0 012-2h3.28a2 2 0 011.664.89l.812 1.22A2 2 0 0012.28 8H19a2 2 0 012 2v7a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+      <span>Proy.</span>
+    </a>
+    <a href="#/facturas" onclick="navigate('#/facturas')">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 14l6-6m-5.5.5h.01m4.99 5h.01M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16l3.5-2 3.5 2 3.5-2 3.5 2z"/></svg>
+      <span>Fact.</span>
+    </a>
+    <a href="#/settings" onclick="navigate('#/settings')">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+      <span>Config</span>
+    </a>
+  </nav>
+
+  <script>
+    // Swipe to open/close sidebar on mobile
+    (function() {
+      let touchStartX = 0;
+      let touchStartY = 0;
+      let touchMoved = false;
+
+      document.addEventListener('touchstart', (e) => {
+        if (!e.touches || !e.touches[0]) return;
+        touchStartX = e.touches[0].clientX;
+        touchStartY = e.touches[0].clientY;
+        touchMoved = false;
+      }, { passive: true });
+
+      document.addEventListener('touchmove', (e) => {
+        if (!e.touches || !e.touches[0]) return;
+        const dx = e.touches[0].clientX - touchStartX;
+        const dy = e.touches[0].clientY - touchStartY;
+        if (Math.abs(dy) > Math.abs(dx)) return; // vertical scroll
+        if (Math.abs(dx) > 10) touchMoved = true;
+      }, { passive: true });
+
+      document.addEventListener('touchend', (e) => {
+        if (!touchMoved) return;
+        const endX = (e.changedTouches && e.changedTouches[0]) ? e.changedTouches[0].clientX : 0;
+        const dx = endX - touchStartX;
+        // swipe right from left edge -> open
+        if (touchStartX < 40 && dx > 80) {
+          const sb = document.getElementById('sidebar'); if (sb) sb.classList.add('open');
+          const ov = document.getElementById('sidebar-overlay'); if (ov) ov.classList.add('show');
+        }
+        // swipe left when sidebar open -> close
+        if (dx < -80) {
+          const sb = document.getElementById('sidebar'); if (sb) sb.classList.remove('open');
+          const ov = document.getElementById('sidebar-overlay'); if (ov) ov.classList.remove('show');
+        }
+      }, { passive: true });
+    })();
+
+    // Hide/show bottom nav on scroll (mobile)
+    (function() {
+      const bottom = document.querySelector('.mobile-bottom-nav');
+      if (!bottom) return;
+      let lastScroll = window.pageYOffset || document.documentElement.scrollTop;
+      let ticking = false;
+      window.addEventListener('scroll', () => {
+        if (ticking) return; ticking = true;
+        requestAnimationFrame(() => {
+          const st = window.pageYOffset || document.documentElement.scrollTop;
+          if (st > lastScroll && st > 60) {
+            // scrolling down
+            bottom.style.transform = 'translateY(100%)';
+          } else {
+            // scrolling up
+            bottom.style.transform = 'translateY(0)';
+          }
+          lastScroll = st <= 0 ? 0 : st;
+          ticking = false;
+        });
+      }, { passive: true });
+      // initial
+      bottom.style.transition = 'transform .28s ease';
+    })();
+  </script>
 </body>
 </html>
