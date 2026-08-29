@@ -25,7 +25,7 @@
 const ADMIN = {
   ARG:  { label: 'Argentina',       flag: 'AR', code: 'ARS', locale: 'es-AR', symbol: '$',   flagColor: '#0055A4', invoice: false },
   PERU: { label: 'Perú',            flag: 'PE', code: 'PEN', locale: 'es-PE', symbol: 'S/',  flagColor: '#DC0000', invoice: false },
-  USA:  { label: 'United States',   flag: 'US', code: 'USD', locale: 'en-US', symbol: 'U$D', flagColor: '#2e7d32', invoice: true  },
+  USA:  { label: 'United States',   flag: 'US', code: 'USD', locale: 'en-US', symbol: 'U$D', flagColor: '#01655C', invoice: true  },
 };
 
 window.saveSessionSettings = function() {
@@ -335,7 +335,7 @@ function renderDashboard() {
     { label: 'Proyectos activos',       value: s.activeProjects,    icon: 'folder',  color: 'blue' },
     { label: 'Presupuestos pendientes', value: s.pendingBudgets,    icon: 'clock',   color: 'yellow' },
     { label: 'Presupuestos cancelados', value: s.cancelledBudgets,  icon: 'cancel',  color: 'red' },
-    { label: 'Ganancias totales',       value: fmtRaw(s.totalEarnings), icon: 'dollar', color: 'green' },
+    { label: 'Ganancias totales (USD)', value: fmtRaw(s.totalEarnings), icon: 'dollar', color: 'green' },
   ];
 
   const kpiIconSVG = {
@@ -405,6 +405,7 @@ function renderDashboard() {
               <div>
                 <p class="text-xs font-semibold text-gray-500 uppercase">Argentina</p>
                 <p class="text-xl font-bold" style="color: ${ADMIN.ARG.flagColor}">${fmtCurrency(s.earningsARG, 'ARG')}</p>
+                <p class="text-xs text-gray-400 mt-0.5">${s.earningsARG_USD ? '≈ ' + fmtCurrency(s.earningsARG_USD, 'USA') : 'Cargá el dólar en tus proyectos ARG'}</p>
               </div>
             </div>
           </div>
@@ -414,6 +415,7 @@ function renderDashboard() {
               <div>
                 <p class="text-xs font-semibold text-gray-500 uppercase">Perú</p>
                 <p class="text-xl font-bold" style="color: ${ADMIN.PERU.flagColor}">${fmtCurrency(s.earningsPERU, 'PERU')}</p>
+                <p class="text-xs text-gray-400 mt-0.5">${s.earningsPERU_USD ? '≈ ' + fmtCurrency(s.earningsPERU_USD, 'USA') : 'Cargá el dólar en tus proyectos PERU'}</p>
               </div>
             </div>
           </div>
@@ -427,12 +429,14 @@ function renderDashboard() {
             </div>
           </div>
         </div>
+        <p class="text-xs text-gray-400 mt-4">El equivalente en USD es información interna: se calcula con el tipo de cambio que cargues en cada proyecto/presupuesto y sirve para comparar administraciones. Nunca se muestra al cliente.</p>
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-5 gap-6">
         <!-- Chart -->
         <div class="lg:col-span-3 bg-white border border-gray-200 rounded-2xl p-6">
-          <h3 class="font-semibold text-gray-900 mb-4">Ganancias — últimos 12 meses</h3>
+          <h3 class="font-semibold text-gray-900 mb-1">Ganancias — últimos 12 meses (USD)</h3>
+          <p class="text-xs text-gray-400 mb-4">Normalizado a dólares para poder comparar Argentina, Perú y USA en el mismo gráfico.</p>
           <canvas id="dash-chart" height="200"></canvas>
         </div>
 
@@ -470,20 +474,15 @@ function renderDashboard() {
       const ctx = canvas.getContext ? canvas.getContext('2d') : canvas;
       const months = DB.getMonthlyData() || [];
       const labels = months.map(m => m.label || '');
-      const dataARG = months.map(m => Number(m.earningsARG || 0));
-      const dataPERU = months.map(m => Number(m.earningsPERU || 0));
-      const dataUSA = months.map(m => Number(m.earningsUSA || 0));
-      // Debugging: print monthly data arrays to console to diagnose empty charts
-      console.log('[dash] months:');
-      console.table(months || []);
-      console.log('[dash] labels:', labels);
-      console.log('[dash] dataARG:', dataARG);
-      console.log('[dash] dataPERU:', dataPERU);
-      console.log('[dash] dataUSA:', dataUSA);
+      // Se recortan los saldos negativos a 0: este gráfico es solo para comparar ganancias positivas
+      // entre administraciones; los saldos negativos (gastos > ingresos en el mes) no se muestran acá.
+      const dataARG = months.map(m => Math.max(0, Number(m.earningsARG || 0)));
+      const dataPERU = months.map(m => Math.max(0, Number(m.earningsPERU || 0)));
+      const dataUSA = months.map(m => Math.max(0, Number(m.earningsUSA || 0)));
       const totalValues = dataARG.concat(dataPERU, dataUSA).reduce((s, v) => s + (Number(v) || 0), 0);
       if (!totalValues) {
-        // no data to display — show a friendly placeholder and hint how to load sample data
-        if (canvas && canvas.parentElement) canvas.parentElement.innerHTML = '<div class="p-6 text-center text-sm text-gray-400">No hay datos de ingresos para los últimos 12 meses.<br><small>Si querés probar la app, ejecutá <code>cargarDatosEjemplo()</code> en la consola para cargar datos de muestra.</small></div>';
+        // no data to display — show a friendly placeholder
+        if (canvas && canvas.parentElement) canvas.parentElement.innerHTML = '<div class="p-6 text-center text-sm text-gray-400">No hay datos normalizados a USD para los últimos 12 meses.<br><small>Revisá que tus proyectos ARG/PERU tengan cargado el tipo de cambio (ver pestaña "Información general" del proyecto o el presupuesto).</small></div>';
         return;
       }
       _dashChart = new Chart(ctx, {
@@ -491,9 +490,9 @@ function renderDashboard() {
       data: {
         labels,
         datasets: [
-          { label: 'Argentina', data: dataARG, backgroundColor: ADMIN.ARG.flagColor + '80', borderColor: ADMIN.ARG.flagColor, borderWidth: 1.5, borderRadius: 6 },
-          { label: 'Perú', data: dataPERU, backgroundColor: ADMIN.PERU.flagColor + '80', borderColor: ADMIN.PERU.flagColor, borderWidth: 1.5, borderRadius: 6 },
-          { label: 'USA', data: dataUSA, backgroundColor: ADMIN.USA.flagColor + '80', borderColor: ADMIN.USA.flagColor, borderWidth: 1.5, borderRadius: 6 },
+          { label: 'Argentina (USD)', data: dataARG, backgroundColor: ADMIN.ARG.flagColor + '80', borderColor: ADMIN.ARG.flagColor, borderWidth: 1.5, borderRadius: 6 },
+          { label: 'Perú (USD)', data: dataPERU, backgroundColor: ADMIN.PERU.flagColor + '80', borderColor: ADMIN.PERU.flagColor, borderWidth: 1.5, borderRadius: 6 },
+          { label: 'USA (USD)', data: dataUSA, backgroundColor: ADMIN.USA.flagColor + '80', borderColor: ADMIN.USA.flagColor, borderWidth: 1.5, borderRadius: 6 },
         ]
       },
       options: {
@@ -501,7 +500,7 @@ function renderDashboard() {
         plugins: { legend: { position: 'top', labels: { font: { family: 'Inter', size: 12 }, boxWidth: 12, boxHeight: 12 } } },
         scales: {
           x: { grid: { display: false } },
-          y: { grid: { color: '#f1f5f9' }, ticks: { font: { family: 'Inter', size: 11 } } }
+          y: { beginAtZero: true, grid: { color: '#f1f5f9' }, ticks: { font: { family: 'Inter', size: 11 } } }
         }
       }
       });
@@ -695,6 +694,11 @@ function renderProjectForm(id) {
             </select>
           </div>
         </div>
+        <div class="form-group" id="pf-fx-wrap" style="${(project?.administration||'ARG')==='USA' ? 'display:none' : ''}">
+          <label class="form-label">Tipo de cambio USD (uso interno)</label>
+          <input id="pf-fx-rate" type="number" min="0" step="0.01" class="form-input" placeholder="Ej: 1500 (valor del dólar)" value="${project?.exchangeRateToUSD || ''}">
+          <p class="text-xs text-gray-400 mt-1">Se usa solo para normalizar este proyecto a dólares en los gráficos de Inicio y Administraciones. No aparece en presupuestos ni facturas.</p>
+        </div>
         <div class="form-group">
           <label class="form-label">Observaciones</label>
           <textarea id="pf-notes" class="form-textarea" rows="2" placeholder="Notas internas...">${esc(project?.notes||'')}</textarea>
@@ -708,18 +712,23 @@ function renderProjectForm(id) {
         const adm = document.getElementById('pf-admin').value;
         const el = document.getElementById('currency-preview');
         if (el) el.textContent = ADMIN[adm]?.code || '';
+        const fxWrap = document.getElementById('pf-fx-wrap');
+        if (fxWrap) fxWrap.style.display = adm === 'USA' ? 'none' : '';
       };
     },
     preConfirm: () => {
       const name = document.getElementById('pf-name').value.trim();
       if (!name) { Swal.showValidationMessage('El nombre es obligatorio'); return false; }
+      const admValue = document.getElementById('pf-admin').value;
+      const fxRateVal = document.getElementById('pf-fx-rate')?.value;
       return {
         name, client: document.getElementById('pf-client').value.trim(),
         date: document.getElementById('pf-date').value,
-        administration: document.getElementById('pf-admin').value,
-        currency: ADMIN[document.getElementById('pf-admin').value]?.code || 'ARS',
+        administration: admValue,
+        currency: ADMIN[admValue]?.code || 'ARS',
         status: document.getElementById('pf-status').value,
         notes: document.getElementById('pf-notes').value.trim(),
+        exchangeRateToUSD: admValue === 'USA' ? undefined : (Number(fxRateVal) || undefined),
       };
     }
   }).then(async r => {
@@ -884,6 +893,24 @@ function renderTabInfo(p) {
         <h3 class="font-semibold text-gray-900 border-b border-gray-100 pb-3 mb-4">Observaciones</h3>
         <p class="text-sm text-gray-600 whitespace-pre-wrap">${esc(p.notes || 'Sin observaciones')}</p>
       </div>
+      ${p.administration !== 'USA' ? (() => {
+        const fin = DB.getProjectFinancials(p.id);
+        const rate = fin.exchangeRateToUSD || 0;
+        return `
+        <div class="bg-white border border-gray-200 rounded-2xl p-6 md:col-span-2" style="border-style:dashed">
+          <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h3 class="font-semibold text-gray-900">Tipo de cambio (uso interno)</h3>
+            <span class="badge badge-gray text-xs">No aparece en presupuestos ni facturas</span>
+          </div>
+          ${rate > 0 ? `
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-center">
+              <div><p class="text-xs text-gray-400 mb-1">Dólar cargado</p><p class="font-bold text-gray-900">1 USD = ${fmtCurrency(rate, p.administration)}</p></div>
+              <div><p class="text-xs text-gray-400 mb-1">Presupuesto aprobado en USD</p><p class="font-bold text-gray-900">${fmtCurrency(fin.budgetTotalUSD, 'USA')}</p></div>
+              <div><p class="text-xs text-gray-400 mb-1">Ganancia en USD</p><p class="font-bold ${fin.profitUSD>=0?'text-green-600':'text-red-600'}">${fmtCurrency(fin.profitUSD, 'USA')}</p></div>
+            </div>
+          ` : `<p class="text-sm text-gray-400">Todavía no cargaste el valor del dólar de este proyecto. Editalo desde "Editar" o desde el presupuesto para que aparezca normalizado en los gráficos de Inicio y Administraciones.</p>`}
+        </div>`;
+      })() : ''}
     </div>
   `;
 }
@@ -894,7 +921,7 @@ function renderTabInfo(p) {
 function renderTabBudgets(project) {
   const budgets = DB.getBudgetsByProject(project.id).sort((a,b) => (a.number||0) - (b.number||0));
   const rowsHTML = budgets.length ? budgets.map(b => {
-    const total = calcBudgetTotal(b.items || []);
+    const total = calcBudgetTotal(b.items || [], b.administration, getBudgetIvaMode(b));
     return `<tr>
       <td class="font-medium text-gray-900">#${(typeof b.number === 'number' ? String(b.number).padStart(3,'0') : (b.number||b.budgetNumber||b.invoiceNumber||'(sin número)'))}</td>
       <td>${badge(b.status, BUDGET_STATUS)}</td>
@@ -974,6 +1001,21 @@ function calcApprovedTotal(items, administration = null, ivaMode = null) {
   const taxRate = (adm === 'ARG' && mode === 'con') ? 0.21 : ((adm === 'PERU' && mode === 'con') ? 0.18 : 0);
   const ivaAmount = Number((base * taxRate).toFixed(2));
   return Number((subtotal + ivaAmount).toFixed(2));
+}
+
+// getBudgetIvaMode - Determina de forma consistente si un presupuesto debe calcularse
+// CON impuesto (IVA/IGV) o SIN él, a partir de los datos ya guardados en el presupuesto.
+// - Perú: el IGV (18%) es obligatorio, siempre se aplica sobre el total.
+// - Argentina: el IVA (21%) es opcional, solo se aplica si el usuario marcó "+IVA" (budget.iva === 'con').
+// - USA y cualquier otra administración: no aplica impuesto.
+// IMPORTANTE: usar siempre este helper (en vez de repetir la lógica a mano) al calcular montos
+// totales de un presupuesto ya guardado (listados, PDF, resúmenes, ingresos automáticos, etc.)
+// para evitar que el IVA/IGV quede afuera del total por error.
+function getBudgetIvaMode(budget) {
+  const adm = String(budget?.administration || '').toUpperCase();
+  if (adm === 'PERU') return 'con';
+  if (adm === 'ARG') return budget?.iva === 'con' ? 'con' : 'sin';
+  return 'sin';
 }
 
 function renderBudgetForm(projectId, budgetId) {
@@ -1073,6 +1115,12 @@ function renderBudgetForm(projectId, budgetId) {
   const totalAprobado = calcApprovedTotal(items, administrationKey, ivaMode);
   const total = calcBudgetTotal(items, administrationKey, ivaMode);
   const showApprovalCol = budget && budget.status !== 'borrador';
+
+  // Tipo de cambio (uso interno): convierte el TOTAL del presupuesto a USD para poder
+  // comparar administraciones en los gráficos de Inicio y Administraciones. Nunca sale
+  // en el PDF del presupuesto ni en la factura (buildBudgetHtmlFragment no lo usa).
+  const fxRate = Number(budget?.exchangeRateToUSD) || 0;
+  const fxUsdPreview = fxRate > 0 ? fmtCurrency(total / fxRate, 'USA') : '—';
 
   setContent(`
     <div class="max-w-5xl mx-auto space-y-6" id="budget-form-wrap">
@@ -1223,6 +1271,24 @@ function renderBudgetForm(projectId, budgetId) {
         </div>
       </div>
 
+      <div id="b-fx-block" class="bg-white border border-gray-200 rounded-2xl p-6" style="border-style:dashed;${administrationKey === 'USA' ? 'display:none' : ''}">
+        <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+          <h3 class="font-semibold text-gray-900">Tipo de cambio (uso interno)</h3>
+          <span class="badge badge-gray text-xs">No aparece en el presupuesto ni en la factura</span>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
+          <div class="form-group mb-0">
+            <label class="form-label">Valor del dólar hoy (1 USD = ? ${adm.code})</label>
+            <input id="b-fx-rate" type="number" min="0" step="0.01" class="form-input" placeholder="Ej: 1500" value="${fxRate || ''}" oninput="updateBudgetFxPreview()">
+          </div>
+          <div>
+            <p class="text-xs text-gray-500 mb-1">Equivalente del total en USD</p>
+            <p class="text-lg font-bold text-gray-900" id="b-fx-usd-preview">${fxUsdPreview}</p>
+          </div>
+        </div>
+        <p class="text-xs text-gray-400 mt-3">Se usa solo para normalizar a dólares los gráficos de Inicio y Administraciones. Es información interna: nunca se muestra al cliente.</p>
+      </div>
+
       <!-- Notes -->
       <div class="bg-white border border-gray-200 rounded-2xl p-6">
         <label class="form-label">Notas / Condiciones / Observaciones</label>
@@ -1284,6 +1350,12 @@ function renderBudgetForm(projectId, budgetId) {
       const ivaBlock = document.getElementById('iva-block');
       const taxSupported = e.target.value === 'ARG' || e.target.value === 'PERU';
       if (ivaBlock) ivaBlock.style.display = taxSupported ? '' : 'none';
+
+      // Mostrar/ocultar el bloque de tipo de cambio (no aplica a USA, ya está en USD)
+      const fxBlock = document.getElementById('b-fx-block');
+      if (fxBlock) fxBlock.style.display = e.target.value === 'USA' ? 'none' : '';
+      const fxRateLabel = document.querySelector('#b-fx-block .form-label');
+      if (fxRateLabel && selectedAdm) fxRateLabel.textContent = `Valor del dólar hoy (1 USD = ? ${selectedAdm.code})`;
 
       const label = document.querySelector('#iva-block .form-label');
       const ivaText = document.querySelector('#iva-block #b-iva-con + span');
@@ -1348,6 +1420,23 @@ function renderBudgetForm(projectId, budgetId) {
     if (partial) partial.textContent = fmtCurrency(approved, window._budgetAdm);
     syncBudgetTaxLabel(String(window._budgetAdm || '').toUpperCase());
     updateTotals();
+  };
+
+  // updateBudgetFxPreview - Recalcula el equivalente en USD del total del presupuesto
+  // a partir del tipo de cambio cargado (uso interno, no va al PDF ni a la factura).
+  window.updateBudgetFxPreview = function() {
+    const previewEl = document.getElementById('b-fx-usd-preview');
+    if (!previewEl) return;
+    const rate = Number(document.getElementById('b-fx-rate')?.value) || 0;
+    const adm = String(window._budgetAdm || '').toUpperCase();
+    const conChecked = document.getElementById('b-iva-con')?.checked;
+    const ivaMode = (adm === 'ARG' || adm === 'PERU') ? (conChecked ? 'con' : 'sin') : 'sin';
+    const grand = calcBudgetTotal(window._liItems || [], window._budgetAdm, ivaMode);
+    if (!(rate > 0)) {
+      previewEl.textContent = '—';
+      return;
+    }
+    previewEl.textContent = fmtCurrency(grand / rate, 'USA');
   };
 
   window.toggleItemApproval = (i) => {
@@ -1459,6 +1548,7 @@ function renderBudgetForm(projectId, budgetId) {
         `;
       }
     }
+    if (typeof window.updateBudgetFxPreview === 'function') window.updateBudgetFxPreview();
   }
 
   function rebuildLiTable() {
@@ -1649,7 +1739,7 @@ window.showApprovalModal = async function(budgetId) {
 
       // Create new project from budget
       const budgetAdministration = budget.administration || 'ARG';
-      const budgetIvaMode = budgetAdministration === 'PERU' ? 'con' : (budgetAdministration === 'ARG' && budget.iva === 'con' ? 'con' : 'sin');
+      const budgetIvaMode = getBudgetIvaMode(budget);
       const approvedAmount = approvalType === 'aprobado-total' ? calcBudgetTotal(budget.items, budgetAdministration, budgetIvaMode) : calcApprovedTotal(budget.items, budgetAdministration, budgetIvaMode);
       const projNum = await DB.nextNumber('projectCounter');
       console.log('Aprobando presupuesto', budgetId, '=> crear proyecto con cantidad aprobada', approvedAmount);
@@ -1741,8 +1831,9 @@ window.createInvoiceFromBudget = async function(budgetId) {
       status: 'aprobado',
       date: today(),
       budgetId: budgetId,
-      budgetAmount: calcBudgetTotal(budget.items || []),
-      number: projNum
+      budgetAmount: calcBudgetTotal(budget.items || [], 'USA', getBudgetIvaMode(budget)), // USA no tiene IVA/IGV
+      number: projNum,
+      exchangeRateToUSD: budget.exchangeRateToUSD, // uso interno, para normalizar gráficos a USD
     });
     await DB.update('budgets', budgetId, { projectId: project.id });
   }
@@ -1790,12 +1881,15 @@ window.saveBudgetForm = async function(projectId, budgetId) {
     const administration = document.getElementById('b-admin')?.value || (budgetId ? DB.get('budgets', budgetId)?.administration : 'ARG') || 'ARG';
     const ivaMode = administration === 'PERU' ? 'con' : (administration === 'ARG' && document.getElementById('b-iva-con')?.checked ? 'con' : 'sin');
     const total = calcBudgetTotal(items, administration, ivaMode);
+    // Tipo de cambio (uso interno): no aplica a USA, que ya está en USD
+    const fxRateInput = document.getElementById('b-fx-rate');
+    const exchangeRateToUSD = (fxRateInput && administration !== 'USA') ? (Number(fxRateInput.value) || undefined) : undefined;
 
     if (!items.length) { notify('Agregá al menos un ítem', 'warning'); return; }
 
     notify('Guardando presupuesto...', 'info');
 
-    let data = { date, status, notes, items, total, administration };
+    let data = { date, status, notes, items, total, administration, exchangeRateToUSD };
 
     // Check if this budget has an associated project (either from parameter or previously approved)
     const hasAssociatedProject = !!projectId || window._budgetHasProject;
@@ -1857,6 +1951,11 @@ window.saveBudgetForm = async function(projectId, budgetId) {
       else if (ivaSin?.checked) data.iva = 'sin';
       else data.iva = undefined;
       await DB.update('budgets', budgetId, data);
+      // Si este presupuesto está vinculado a un proyecto, sincronizar el tipo de cambio
+      // para que los gráficos de Inicio y Administraciones queden actualizados.
+      if (data.projectId && exchangeRateToUSD !== undefined) {
+        try { await DB.update('projects', data.projectId, { exchangeRateToUSD }); } catch (e) { console.warn('No se pudo sincronizar el tipo de cambio con el proyecto:', e); }
+      }
       notify('Presupuesto guardado');
       navigate('#/presupuestos');
     } else {
@@ -1906,8 +2005,9 @@ window.approveBudget = async function(budgetId, projectId) {
       status: 'aprobado',
       date: today(),
       budgetId: budgetId,
-      budgetAmount: calcBudgetTotal(budget.items || []),
-      number: projNum
+      budgetAmount: calcBudgetTotal(budget.items || [], budget.administration, getBudgetIvaMode(budget)),
+      number: projNum,
+      exchangeRateToUSD: budget.exchangeRateToUSD, // uso interno, para normalizar gráficos a USD
     });
   }
 
@@ -1926,7 +2026,7 @@ window.approveBudget = async function(budgetId, projectId) {
       budgetId,
       date: budget.date || today(),
       description: `Presupuesto aprobado ${formatBudgetRef(budget.number ?? budget.budgetNumber ?? '')}`,
-      amount: calcBudgetTotal(budget.items || [], budget.administration || 'ARG', budget.administration === 'ARG' && budget.iva === 'con' ? 'con' : 'sin', budget.administration || 'ARG', budget.administration === 'ARG' && budget.iva === 'con' ? 'con' : 'sin'),
+      amount: calcBudgetTotal(budget.items || [], budget.administration || 'ARG', getBudgetIvaMode(budget)),
     });
   }
 
@@ -2004,16 +2104,17 @@ function renderTabOperations(project) {
     <!-- Resumen financiero -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
       ${[
-        ['Presupuesto Aprobado', DB.getBudgetsByProject(project.id).filter(b=>['aprobado-total','aprobado-parcial'].includes(b.status)).reduce((s,b)=>s+calcBudgetTotal(b.items||[]),0), 'text-gray-900'],
+        ['Presupuesto Aprobado', DB.getBudgetsByProject(project.id).filter(b=>['aprobado-total','aprobado-parcial'].includes(b.status)).reduce((s,b)=>s+calcBudgetTotal(b.items||[], b.administration, getBudgetIvaMode(b)),0), 'text-gray-900'],
         ['Total Ingresos', fin.totalIncome, 'text-green-600'],
         ['Total Gastos', fin.totalExpense, 'text-red-600'],
         ['Ganancia', fin.profit, fin.profit >= 0 ? 'text-green-600' : 'text-red-600'],
       ].map(([l,v,c]) => {
-        // For "Presupuesto Aprobado" show secondary tax note depending on administration
+        // For "Presupuesto Aprobado" mostrar nota de impuesto: el monto de arriba YA incluye
+        // el IVA/IGV cuando corresponde (ver getBudgetIvaMode), esta nota es solo informativa.
         let extra = '';
         if (l === 'Presupuesto Aprobado') {
-          if (project.administration === 'PERU') extra = '<div class="text-xs text-gray-400 mt-1">+ IGV</div>';
-          else if (project.administration === 'ARG') extra = '<div class="text-xs text-gray-400 mt-1">+ IVA</div>';
+          if (project.administration === 'PERU') extra = '<div class="text-xs text-gray-400 mt-1">IGV incluido</div>';
+          else if (project.administration === 'ARG') extra = '<div class="text-xs text-gray-400 mt-1">IVA incluido si aplica</div>';
         }
         // For Total Ingresos show bruto in parentheses for taxed administrations
         let valueHtml = `<p class="text-lg font-bold ${c}">${fmtCurrency(v, project.administration)}</p>`;
@@ -2475,7 +2576,7 @@ function renderTracker() {
   const clients = [...new Set(budgets.map(b => b.clientName).filter(Boolean))].sort();
 
   const rows = budgets.map(b => {
-    const total = calcBudgetTotal(b.items || []);
+    const total = calcBudgetTotal(b.items || [], b.administration, getBudgetIvaMode(b));
     const project = b.projectId ? DB.get('projects', b.projectId) : null;
     const refRaw = b.number ?? b.budgetNumber ?? b.invoiceNumber ?? '(sin número)';
     const ref = refRaw === '(sin número)' ? refRaw : formatBudgetRef(refRaw);
@@ -2633,6 +2734,8 @@ function renderAdministraciones() {
   setBreadcrumb([{ label: 'Administraciones' }]);
   setActions('');
 
+  const usdByAdmin = {};
+
   const cards = Object.entries(ADMIN).map(([key, a]) => {
     const allProjects = DB.getAll('projects').filter(p => p.administration === key);
     const pendingProjects = allProjects.filter(p => p.status === 'pendiente');
@@ -2641,15 +2744,18 @@ function renderAdministraciones() {
 
     // Ganancias/pérdidas reales por proyecto (mismo cálculo que la lista de proyectos).
     let earnings = 0;
+    let earningsUSD = 0;
     let approvedAmount = 0;
     allProjects.forEach(p => {
       try {
         const fin = DB.getProjectFinancials(p.id);
         earnings += Number(fin.profit || 0) || 0;
+        earningsUSD += Number(fin.profitUSD || 0) || 0;
         if (p.status === 'aprobado') approvedAmount += Number(fin.budgetTotal || 0) || 0;
       } catch (e) { /* ignore */ }
     });
-    
+    usdByAdmin[key] = earningsUSD;
+
     return `
       <div class="kpi-card border-2 hover:shadow-lg transition-shadow" style="border-color: ${a.flagColor}30">
         <div class="flex items-center gap-3 mb-5 pb-4 border-b-2" style="border-color: ${a.flagColor}30">
@@ -2681,8 +2787,9 @@ function renderAdministraciones() {
         <div class="p-4 rounded-xl text-center mb-4 w-full min-w-0 overflow-hidden" style="background: ${a.flagColor}20; border: 2px solid ${a.flagColor}40">
           <p class="text-xs font-bold uppercase mb-2" style="color: ${a.flagColor}">Ganancias Totales</p>
           <p class="text-xl md:text-2xl font-bold leading-none break-all" style="color: ${a.flagColor}">${fmtCurrency(earnings, key)}</p>
+          <p class="text-xs text-gray-500 mt-1">${earningsUSD ? '≈ ' + fmtCurrency(earningsUSD, 'USA') : (key === 'USA' ? '' : 'Cargá el dólar para ver el equivalente')}</p>
         </div>
-        
+
         <button onclick="filterProjectsByAdmin('${key}')" class="btn btn-secondary btn-sm w-full">
           Ver proyectos de ${a.label}
         </button>
@@ -2690,12 +2797,123 @@ function renderAdministraciones() {
     `;
   }).join('');
 
+  const hasUsdData = Object.values(usdByAdmin).some(v => v);
+
+  // Distribución de ganancias por administración (gráfico de dona, normalizado a USD)
+  const donutTotal = (Number(usdByAdmin.ARG) || 0) + (Number(usdByAdmin.PERU) || 0) + (Number(usdByAdmin.USA) || 0);
+  const donutData = [
+    { key: 'ARG',  label: 'Argentina', color: ADMIN.ARG.flagColor,  value: Number(usdByAdmin.ARG) || 0 },
+    { key: 'PERU', label: 'Perú',      color: ADMIN.PERU.flagColor, value: Number(usdByAdmin.PERU) || 0 },
+    { key: 'USA',  label: 'USA',       color: ADMIN.USA.flagColor,  value: Number(usdByAdmin.USA) || 0 },
+  ];
+  // El 100% de la dona se reparte SOLO entre las administraciones con ganancia real (value > 0).
+  // Una administración en pérdida no puede ser "parte de una torta de ganancias", así que no
+  // suma al 100% ni tiene gajo propio: se muestra aparte, con su monto en rojo y sin porcentaje.
+  const donutGainsTotal = donutData.reduce((s, d) => s + (d.value > 0 ? d.value : 0), 0);
+  const donutLegendHTML = donutData.map(d => {
+    const isGain = d.value > 0;
+    const pct = isGain && donutGainsTotal > 0 ? (d.value / donutGainsTotal * 100) : 0;
+    return `
+      <div class="mb-3 last:mb-0">
+        <div class="flex items-center justify-between mb-1 gap-2">
+          <div class="flex items-center gap-2 min-w-0">
+            <span class="w-2.5 h-2.5 rounded-full flex-shrink-0" style="background:${isGain ? d.color : '#dc2626'}"></span>
+            <span class="text-sm font-medium text-gray-700 truncate">${d.label}</span>
+          </div>
+          <div class="text-right flex-shrink-0">
+            <span class="text-sm font-semibold ${d.value < 0 ? 'text-red-600' : 'text-gray-900'}">${fmtCurrency(d.value, 'USA')}</span>
+            ${isGain
+              ? `<span class="text-xs text-gray-400 ml-1">${pct.toFixed(1)}%</span>`
+              : (d.value < 0 ? `<span class="text-xs text-red-400 ml-1">pérdida</span>` : `<span class="text-xs text-gray-300 ml-1">sin datos</span>`)}
+          </div>
+        </div>
+        ${isGain
+          ? `<div class="w-full bg-gray-100 rounded-full h-1.5"><div class="h-1.5 rounded-full" style="width:${pct}%; background:${d.color}"></div></div>`
+          : (d.value < 0 ? `<p class="text-[11px] text-gray-400 mt-0.5">No forma parte del 100% (no es ganancia)</p>` : '')}
+      </div>
+    `;
+  }).join('');
+
   setContent(`
     <div class="max-w-5xl mx-auto">
       <p class="text-sm text-gray-600 mb-6">Resumen de actividad por administración. Cada administración maneja su propia moneda y contabilidad.</p>
+
+      <div class="bg-white border border-gray-200 rounded-2xl p-6 mb-6">
+        <div class="flex items-start justify-between mb-1 gap-4">
+          <div>
+            <h3 class="font-semibold text-gray-900 mb-1">Distribución de ganancias por Administración</h3>
+            <p class="text-xs text-gray-400">Ganancias de cada administración normalizadas a dólares (uso interno). El % se reparte solo entre las administraciones con ganancia real; una pérdida se muestra aparte, sin porcentaje.</p>
+          </div>
+          ${hasUsdData ? `
+          <div class="text-right flex-shrink-0">
+            <p class="text-xs text-gray-400">Total (neto)</p>
+            <p class="text-lg font-bold text-gray-900">${fmtCurrency(donutTotal, 'USA')}</p>
+          </div>` : ''}
+        </div>
+        ${hasUsdData ? `
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-6 items-center mt-4">
+          <div class="relative flex items-center justify-center" style="min-height:200px;">
+            <canvas id="admin-donut-chart" height="200"></canvas>
+          </div>
+          <div>
+            ${donutLegendHTML}
+          </div>
+        </div>
+        ` : '<p class="text-sm text-gray-400 text-center py-6">Todavía no hay proyectos con el tipo de cambio cargado. Cargalo en cada proyecto o presupuesto (sección "Tipo de cambio, uso interno") para ver la comparativa acá.</p>'}
+      </div>
+
       <div class="grid grid-cols-1 md:grid-cols-3 gap-6">${cards}</div>
     </div>
   `);
+
+  // La dona (gajos) solo incluye administraciones con ganancia real (value > 0) — una pérdida
+  // no puede dibujarse como parte de un 100% de ganancias, así que no tiene gajo propio.
+  const donutGainsData = donutData.filter(d => d.value > 0);
+
+  if (hasUsdData) {
+    requestAnimationFrame(() => {
+      try {
+        const canvas = document.getElementById('admin-donut-chart');
+        if (!canvas || typeof window.Chart === 'undefined') return;
+        if (!donutGainsData.length) {
+          canvas.parentElement.innerHTML = '<div class="p-6 text-center text-sm text-gray-400">Ninguna administración tiene ganancia positiva todavía.</div>';
+          return;
+        }
+        new Chart(canvas.getContext('2d'), {
+          type: 'doughnut',
+          data: {
+            labels: donutGainsData.map(d => d.label),
+            datasets: [{
+              data: donutGainsData.map(d => d.value),
+              backgroundColor: donutGainsData.map(d => d.color),
+              borderColor: '#fff',
+              borderWidth: 2,
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            cutout: '68%',
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                callbacks: {
+                  label: (tctx) => {
+                    const d = donutGainsData[tctx.dataIndex] || {};
+                    const v = Number(d.value) || 0;
+                    const pct = donutGainsTotal > 0 ? (v / donutGainsTotal * 100) : 0;
+                    return ` ${d.label}: ${fmtCurrency(v, 'USA')} (${pct.toFixed(1)}%)`;
+                  }
+                }
+              }
+            }
+          }
+        });
+      } catch (err) {
+        console.error('Error creando gráfico comparativo de administraciones:', err);
+      }
+    });
+  }
 }
 
 window.filterProjectsByAdmin = function(adminKey) {
@@ -3350,8 +3568,13 @@ window.buildBudgetHtmlFragment = function(budget) {
   const cfg = DB.getConfig() || {};
   const comp = cfg.company || {};
   const adm = ADMIN[administration] || ADMIN.ARG;
-  const total = calcBudgetTotal(budget.items || []);
-  const approvedTotal = calcApprovedTotal(budget.items || []);
+  // IMPORTANTE: el total del PDF/presupuesto que ve el cliente tiene que incluir el IVA/IGV
+  // cuando corresponde (ver getBudgetIvaMode) — antes se calculaba sin pasar la administración
+  // ni el modo de impuesto, así que siempre daba el subtotal sin impuesto.
+  const budgetIvaModeForPdf = getBudgetIvaMode(budget);
+  const pdfBreakdown = calcBudgetBreakdown(budget.items || [], administration, budgetIvaModeForPdf);
+  const total = pdfBreakdown.total;
+  const approvedTotal = calcApprovedTotal(budget.items || [], administration, budgetIvaModeForPdf);
   const isPartialApproval = budget.status === 'aprobado-parcial';
   const showApprovalCol = budget.status !== 'borrador';
   const statusMeta = (BUDGET_STATUS && BUDGET_STATUS[budget.status]) || { badge: '', label: (budget.status || '') };
@@ -3438,6 +3661,16 @@ window.buildBudgetHtmlFragment = function(budget) {
       <!-- Total -->
       <div style="display:flex;justify-content:flex-end;margin-bottom:24px">
         <div style="min-width:280px">
+          ${pdfBreakdown.iva > 0 ? `
+            <div style="display:flex;justify-content:space-between;gap:16px;padding:2px 4px;font-size:13px;color:#64748b">
+              <span>${isEnglish ? 'Subtotal' : 'Subtotal'}</span>
+              <span>${fmtCurrency(pdfBreakdown.subtotal, administration)}</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;gap:16px;padding:2px 4px 10px;font-size:13px;color:#334155;font-weight:600">
+              <span>${getTaxLabel(administration, true)}</span>
+              <span>+ ${fmtCurrency(pdfBreakdown.iva, administration)}</span>
+            </div>
+          ` : ''}
           ${isPartialApproval ? `
             <div style="background:#FEF3C7;border:2px solid #FDE68A;border-radius:10px;padding:14px 20px;text-align:right;margin-bottom:10px">
               <p style="color:#92400E;font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin:0 0 4px;font-weight:700">${t.approvedTotal}</p>

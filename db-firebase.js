@@ -578,10 +578,16 @@ const DB = (() => {
   
   /**
    * getApprovedBudgetTotal - Calcula el monto aprobado de un presupuesto
-   * 
+   *
    * IMPORTANTE:
-   * - Aprobación TOTAL: Devuelve budget.total
-   * - Aprobación PARCIAL: Suma solo los items con aprobado=true
+   * - Aprobación TOTAL: Devuelve budget.total (ya incluye IVA/IGV si corresponde, se calculó al guardar)
+   * - Aprobación PARCIAL: Suma solo los items con aprobado=true y les aplica el mismo
+   *   IVA/IGV que al resto del presupuesto (Perú: siempre 18%; Argentina: 21% solo si
+   *   budget.iva === 'con'; resto de administraciones: sin impuesto).
+   *
+   * FIX: antes esta función sumaba item.precio, un campo que no existe en los ítems del
+   * presupuesto (los ítems usan qty/unitPrice) y tampoco aplicaba IVA/IGV — por lo que
+   * una aprobación PARCIAL siempre daba $0 y, de no ser así, hubiera quedado sin impuesto.
    */
   function getApprovedBudgetTotal(budget) {
     if (!budget) return 0;
@@ -589,16 +595,45 @@ const DB = (() => {
       return budget.total || 0;
     }
     if (budget.status === 'aprobado-parcial') {
-      return (budget.items || [])
+      const adm = String(budget.administration || '').toUpperCase();
+      const ivaMode = adm === 'PERU' ? 'con' : ((adm === 'ARG' && budget.iva === 'con') ? 'con' : 'sin');
+      const taxRate = (adm === 'ARG' && ivaMode === 'con') ? 0.21 : ((adm === 'PERU' && ivaMode === 'con') ? 0.18 : 0);
+      const subtotal = (budget.items || [])
         .filter(item => item.aprobado === true)
-        .reduce((sum, item) => sum + (Number(item.precio) || 0), 0);
+        .reduce((sum, item) => sum + ((Number(item.qty) || 0) * (Number(item.unitPrice) || 0)), 0);
+      return Number((subtotal * (1 + taxRate)).toFixed(2));
     }
     return 0;
   }
   
   /**
+   * _effectiveExchangeRate - Resuelve qué tipo de cambio (moneda local por 1 USD) usar
+   * para normalizar un proyecto a dólares.
+   *
+   * Orden de prioridad:
+   * 1. project.exchangeRateToUSD (cargado a mano en el proyecto)
+   * 2. exchangeRateToUSD del presupuesto activo/aprobado (cargado en el presupuesto)
+   * 3. USA → 1 (ya está en USD)
+   * 4. Sin dato → 0 (no se puede normalizar; se excluye de los totales en USD)
+   *
+   * IMPORTANTE: esta información es de uso interno (gráficos de Inicio y Administraciones).
+   * Nunca debe usarse para armar el PDF del presupuesto ni de la factura.
+   */
+  function _effectiveExchangeRate(project, budget) {
+    const adm = String((project && project.administration) || '').toUpperCase();
+    let rate = Number(project && project.exchangeRateToUSD);
+    if (!isFinite(rate) || rate <= 0) {
+      rate = Number(budget && budget.exchangeRateToUSD);
+    }
+    if (!isFinite(rate) || rate <= 0) {
+      rate = (adm === 'USA') ? 1 : 0;
+    }
+    return rate;
+  }
+
+  /**
    * getProjectFinancials - Calcula métricas financieras de un proyecto
-   * 
+   *
    * RETORNA:
    * - budgetTotal: Monto aprobado del presupuesto
    * - totalIncome: Total de ingresos del proyecto
@@ -613,14 +648,34 @@ const DB = (() => {
     const budgetTotal = getApprovedBudgetTotal(budget);
 
     const incomes = getIncomesByProject(projectId);
-    // Determine administration from project to apply correct tax rules
     const project = get('projects', projectId) || {};
-    const adm = String(project.administration || '').toUpperCase();
-    const taxRate = (adm === 'ARG') ? 0.21 : ((adm === 'PERU') ? 0.18 : 0);
     const totalIncomeGross = incomes.reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
-    const totalIncome = taxRate > 0
-      ? incomes.reduce((s, i) => s + ((Number(i.amount) || 0) / (1 + taxRate)), 0)
-      : totalIncomeGross;
+
+    // FIX: antes se le quitaba el IVA/IGV a TODOS los ingresos del proyecto usando una única
+    // tasa fija según la administración del proyecto (ARG 21% / PERU 18%), sin importar si ESE
+    // ingreso en particular realmente tenía impuesto incluido. Esto restaba IVA/IGV de ingresos
+    // que nunca lo tuvieron: un ingreso manual (cargado a mano, sin presupuesto asociado) o un
+    // ingreso de un presupuesto de Argentina cargado "Sin IVA" — el resultado se veía como un
+    // IVA "duplicado" (se descontaba un impuesto que jamás se había cobrado).
+    //
+    // Ahora se calcula ingreso por ingreso:
+    // - Ingreso automático (vinculado a un presupuesto vía budgetId): se usa el impuesto real de
+    //   ESE presupuesto (Perú siempre IGV 18%; Argentina 21% solo si tenía "+IVA" tildado).
+    // - Ingreso manual (sin presupuesto asociado): se toma el monto tal cual, sin restarle ningún
+    //   impuesto, porque no hay forma de saber si ya lo incluye.
+    const totalIncome = incomes.reduce((sum, i) => {
+      const amount = Number(i.amount) || 0;
+      let rate = 0;
+      if (i.budgetId) {
+        const linkedBudget = get('budgets', i.budgetId);
+        if (linkedBudget) {
+          const badm = String(linkedBudget.administration || '').toUpperCase();
+          const bIvaMode = badm === 'PERU' ? 'con' : ((badm === 'ARG' && linkedBudget.iva === 'con') ? 'con' : 'sin');
+          rate = (badm === 'ARG' && bIvaMode === 'con') ? 0.21 : ((badm === 'PERU' && bIvaMode === 'con') ? 0.18 : 0);
+        }
+      }
+      return sum + (rate > 0 ? (amount / (1 + rate)) : amount);
+    }, 0);
 
     const expenses = getExpensesByProject(projectId);
     const totalExpense = expenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
@@ -631,8 +686,7 @@ const DB = (() => {
     const percentUsed = budgetTotal > 0 ? (totalSpent / budgetTotal) * 100 : 0;
 
     // Conversión a USD (moneda local por 1 USD). USA = 1 por defecto.
-    let rate = Number(project.exchangeRateToUSD);
-    if (!isFinite(rate) || rate <= 0) rate = (adm === 'USA') ? 1 : 0;
+    const rate = _effectiveExchangeRate(project, budget);
     const profitUSD = rate > 0 ? (profit / rate) : 0;
     const budgetTotalUSD = rate > 0 ? (budgetTotal / rate) : 0;
 
@@ -684,16 +738,20 @@ const DB = (() => {
 
     // Ganancias por administración = suma de profit real de cada proyecto (mismo cálculo que la lista de proyectos)
     const earnings = { ARG: 0, PERU: 0, USA: 0 };
+    // Equivalente en USD por administración, usando el tipo de cambio cargado en cada proyecto/presupuesto.
+    // Esto es lo que permite comparar ARG/PERU/USA en los gráficos aunque manejen montos muy distintos.
+    const earningsUSDByAdmin = { ARG: 0, PERU: 0, USA: 0 };
     let earningsUSD = 0;
     projects.forEach(p => {
       try {
         const fin = getProjectFinancials(p.id);
         const adm = String(p.administration || '').toUpperCase();
         const profit = Number(fin.profit || 0) || 0;
-        if (adm === 'ARG') earnings.ARG += profit;
-        else if (adm === 'PERU') earnings.PERU += profit;
-        else if (adm === 'USA') earnings.USA += profit;
-        earningsUSD += Number(fin.profitUSD || 0) || 0;
+        const profitUSD = Number(fin.profitUSD || 0) || 0;
+        if (adm === 'ARG') { earnings.ARG += profit; earningsUSDByAdmin.ARG += profitUSD; }
+        else if (adm === 'PERU') { earnings.PERU += profit; earningsUSDByAdmin.PERU += profitUSD; }
+        else if (adm === 'USA') { earnings.USA += profit; earningsUSDByAdmin.USA += profitUSD; }
+        earningsUSD += profitUSD;
       } catch (e) { /* ignore */ }
     });
 
@@ -717,6 +775,9 @@ const DB = (() => {
       earningsARG,
       earningsPERU,
       earningsUSA,
+      earningsARG_USD: earningsUSDByAdmin.ARG,
+      earningsPERU_USD: earningsUSDByAdmin.PERU,
+      earningsUSA_USD: earningsUSDByAdmin.USA,
       earningsUSD,
       totalEarnings,
       totalProjects,
@@ -726,42 +787,63 @@ const DB = (() => {
   }
   
   /**
-   * getMonthlyData - Genera datos de ingresos mensuales para el gráfico
-   * Retorna los últimos 12 meses con ingresos por administración
+   * getMonthlyData - Genera datos de ganancias mensuales para el gráfico de Inicio
+   * Retorna los últimos 12 meses, con el neto (ingresos - gastos) de cada administración
+   * normalizado a USD usando el tipo de cambio cargado en cada proyecto/presupuesto
+   * (ver _effectiveExchangeRate). Así ARG (montos en millones) y PERU/USA (montos chicos)
+   * quedan en la misma escala y son comparables en el mismo gráfico.
+   *
+   * IMPORTANTE: un proyecto sin tipo de cambio cargado (ARG/PERU) no puede normalizarse
+   * y queda afuera de este cálculo hasta que se le cargue el valor del dólar.
    */
   function getMonthlyData() {
-    const operations = getAll('operations');
     const now = new Date();
-    
     const monthlyData = [];
-    
     for (let i = 11; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const label = d.toLocaleDateString('es-ES', { month: 'short', year: 'numeric' });
-      
-      const monthKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-      
-      const earningsARG = operations
-        .filter(o => o.tipo === 'ingreso' && o.administration === 'ARG' && o.date?.startsWith(monthKey))
-        .reduce((s, r) => s + (Number(r.monto) || 0), 0);
-      
-      const earningsPERU = operations
-        .filter(o => o.tipo === 'ingreso' && o.administration === 'PERU' && o.date?.startsWith(monthKey))
-        .reduce((s, r) => s + (Number(r.monto) || 0), 0);
-      
-      const earningsUSA = operations
-        .filter(o => o.tipo === 'ingreso' && o.administration === 'USA' && o.date?.startsWith(monthKey))
-        .reduce((s, r) => s + (Number(r.monto) || 0), 0);
-      
       monthlyData.push({
-        label,
-        earningsARG,
-        earningsPERU,
-        earningsUSA
+        key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
+        label: d.toLocaleDateString('es-ES', { month: 'short', year: 'numeric' }),
+        earningsARG: 0,
+        earningsPERU: 0,
+        earningsUSA: 0
       });
     }
-    
-    return monthlyData;
+
+    const projects = getAll('projects');
+    const projectById = {};
+    projects.forEach(p => { projectById[p.id] = p; });
+
+    const budgetByProjectId = {};
+    getAll('budgets').forEach(b => {
+      if (!b.projectId) return;
+      if (['aprobado-total', 'aprobado-parcial'].includes(b.status)) budgetByProjectId[b.projectId] = b;
+    });
+
+    const applyToMonth = (projectId, dateStr, amount, sign) => {
+      const project = projectById[projectId];
+      if (!project) return;
+      const key = String(dateStr || '').slice(0, 7);
+      const month = monthlyData.find(m => m.key === key);
+      if (!month) return;
+      const rate = _effectiveExchangeRate(project, budgetByProjectId[projectId]);
+      if (!(rate > 0)) return; // sin tipo de cambio cargado: no se puede normalizar todavía
+      const usd = ((Number(amount) || 0) / rate) * sign;
+      const adm = String(project.administration || '').toUpperCase();
+      if (adm === 'ARG') month.earningsARG += usd;
+      else if (adm === 'PERU') month.earningsPERU += usd;
+      else if (adm === 'USA') month.earningsUSA += usd;
+    };
+
+    getAll('incomes').forEach(inc => applyToMonth(inc.projectId, inc.date, inc.amount, 1));
+    getAll('expenses').forEach(exp => applyToMonth(exp.projectId, exp.date, exp.amount, -1));
+
+    return monthlyData.map(m => ({
+      label: m.label,
+      earningsARG: Math.round(m.earningsARG),
+      earningsPERU: Math.round(m.earningsPERU),
+      earningsUSA: Math.round(m.earningsUSA)
+    }));
   }
   
   // ========================================

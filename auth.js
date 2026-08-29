@@ -614,9 +614,12 @@ const Auth = (() => {
 
   function _onActivity() {
     updateLastActivity();
-    // If a warning modal is visible, close it because user became active
+    // Si el aviso de "sesión por expirar" está visible, cerrarlo porque el usuario volvió a interactuar.
+    // IMPORTANTE: solo debe cerrar ESE modal (controlado por _inactivityWarningShown), nunca cualquier
+    // Swal que esté abierto — de lo contrario, el mismo click que abre un modal de la app (ej: "Editar
+    // Gasto") burbujea hasta acá y cierra el modal recién abierto en el mismo instante.
     try {
-      if (typeof Swal !== 'undefined' && Swal.isVisible()) {
+      if (_inactivityWarningShown && typeof Swal !== 'undefined' && Swal.isVisible()) {
         Swal.close();
         _inactivityWarningShown = false;
       }
