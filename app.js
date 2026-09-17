@@ -21,6 +21,10 @@
  * - flagColor: Color que se usa en badges, PDFs y UI
  * - invoice: Si es true, puede generar INVOICE en lugar de FACTURA
  * - Los PDFs salen en INGLÉS solo si es USA, el resto en ESPAÑOL
+ *
+ * [SECCIÓN: COLORES POR ADMINISTRACIÓN] — para cambiar el color identificatorio
+ * de ARG/PERU/USA (el que se ve en el badge del PDF y en la dona de Administraciones),
+ * editar el "flagColor" de cada una acá abajo.
  */
 const ADMIN = {
   ARG:  { label: 'Argentina',       flag: 'AR', code: 'ARS', locale: 'es-AR', symbol: '$',   flagColor: '#0055A4', invoice: false },
@@ -193,6 +197,76 @@ function today() {
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// [SECCIÓN: LIMPIEZA DE DESCRIPCIONES DE ÍTEMS]
+// La descripción de cada ítem de presupuesto/factura se edita en un campo "contenteditable"
+// (no un <textarea> común), así que lo que se guarda en la base de datos es HTML real, no texto
+// plano — por eso permite renglones (<br>). El problema: si alguien pega texto copiado desde
+// Word, Gmail, o una página web, el navegador puede traer pegado TODO el estilo original de esa
+// fuente (por ejemplo un <br style="--tw-...montones-de-props...">), que no se nota en pantalla
+// (esos estilos no significan nada fuera de esa página) pero termina imprimiéndose LETRA POR
+// LETRA como texto en el PDF si se escapa con esc() — eso es lo que inflaba el PDF a varias
+// páginas de texto ilegible. Esta función limpia esa basura: saca CUALQUIER atributo (style,
+// class, etc.) y solo deja pasar <br>, <b>, <strong>, <i>, <em>, <u> — el resto de las etiquetas
+// se "desenvuelve" (se conserva el texto de adentro, se descarta la etiqueta). Se usa en el PDF
+// en lugar de esc() para las descripciones de ítems. El handleDescPaste() de más abajo evita que
+// esta basura se vuelva a guardar para ítems nuevos.
+function sanitizeItemDescriptionHtml(html) {
+  if (!html) return '';
+  const container = document.createElement('div');
+  container.innerHTML = html;
+  const ALLOWED_TAGS = { BR: true, B: true, STRONG: true, I: true, EM: true, U: true };
+  const BLOCK_TAGS = { DIV: true, P: true, LI: true, TR: true };
+  (function clean(node) {
+    Array.from(node.childNodes).forEach(child => {
+      if (child.nodeType === 1) { // elemento
+        clean(child);
+        if (ALLOWED_TAGS[child.tagName]) {
+          while (child.attributes.length) child.removeAttribute(child.attributes[0].name);
+        } else {
+          // Etiqueta no permitida (incluye la basura tipo <br style="--tw-...">): se saca la
+          // etiqueta pero se conserva su contenido/texto. Si era un bloque (div/p/li/tr) se
+          // agrega un <br> para no pegar el texto de golpe con lo siguiente.
+          while (child.firstChild) node.insertBefore(child.firstChild, child);
+          if (BLOCK_TAGS[child.tagName]) node.insertBefore(document.createElement('br'), child);
+          node.removeChild(child);
+        }
+      } else if (child.nodeType === 8) { // comentario HTML: afuera
+        node.removeChild(child);
+      }
+    });
+  })(container);
+  return container.innerHTML;
+}
+
+// Pega el texto del portapapeles como texto PLANO (sin negrita/color/estilos) dentro de los
+// campos de descripción de ítems. Sin esto, copiar/pegar desde Word, Gmail o una web arrastra
+// el HTML/CSS original de esa fuente y termina imprimiéndose tal cual en el PDF (ver
+// sanitizeItemDescriptionHtml de arriba). Los saltos de línea SÍ se conservan como <br>.
+function handleDescPaste(e) {
+  e.preventDefault();
+  const text = (e.clipboardData || window.clipboardData).getData('text/plain') || '';
+  const sel = window.getSelection();
+  if (!sel || !sel.rangeCount) return;
+  const range = sel.getRangeAt(0);
+  range.deleteContents();
+  const lines = text.split(/\r\n|\r|\n/);
+  const frag = document.createDocumentFragment();
+  let lastNode = null;
+  lines.forEach((line, idx) => {
+    if (idx > 0) frag.appendChild(document.createElement('br'));
+    lastNode = document.createTextNode(line);
+    frag.appendChild(lastNode);
+  });
+  range.insertNode(frag);
+  if (lastNode) {
+    range.setStartAfter(lastNode);
+    range.setEndAfter(lastNode);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+  e.target.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
 function badge(status, map) {
@@ -497,10 +571,10 @@ function renderDashboard() {
       },
       options: {
         responsive: true, maintainAspectRatio: true,
-        plugins: { legend: { position: 'top', labels: { font: { family: 'Inter', size: 12 }, boxWidth: 12, boxHeight: 12 } } },
+        plugins: { legend: { position: 'top', labels: { font: { family: 'Aktiv Grotesk', size: 12 }, boxWidth: 12, boxHeight: 12 } } },
         scales: {
           x: { grid: { display: false } },
-          y: { beginAtZero: true, grid: { color: '#f1f5f9' }, ticks: { font: { family: 'Inter', size: 11 } } }
+          y: { beginAtZero: true, grid: { color: '#f1f5f9' }, ticks: { font: { family: 'Aktiv Grotesk', size: 11 } } }
         }
       }
       });
@@ -1066,7 +1140,9 @@ function renderBudgetForm(projectId, budgetId) {
 
   const items = budget?.items || [{ description: '', qty: 1, unitPrice: 0, aprobado: false }];
   const clients = DB.getAll('clients');
-  const selectedClientName = budget?.clientName || '';
+  // Si el presupuesto ya está vinculado a un proyecto, el cliente que se muestra/edita acá
+  // es el del proyecto (existingProject.client); si no, es el del propio presupuesto.
+  const selectedClientName = hasProject ? (existingProject.client || '') : (budget?.clientName || '');
   const hasSelectedClient = selectedClientName && !clients.some(c => c.name === selectedClientName);
   const clientOptions = clients.map(c => `<option value="${esc(c.name)}" ${selectedClientName === c.name ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
   const clientSelectOptions = `${clientOptions}${hasSelectedClient ? `<option value="${esc(selectedClientName)}" selected>${esc(selectedClientName)}</option>` : ''}<option value="__new_client__">+ Nuevo cliente</option>`;
@@ -1082,7 +1158,7 @@ function renderBudgetForm(projectId, budgetId) {
         <input type="checkbox" ${it.aprobado ? 'checked' : ''} ${isReadOnly ? 'disabled' : ''} onchange="toggleItemApproval(${i})" style="width:18px;height:18px;cursor:pointer">
       </td>` : ''}
       <td>
-        <div class="li-desc" data-placeholder="Descripción del ítem..." contenteditable="${!isReadOnly}" oninput="updateLiRow(${i})" onkeydown="liDescKeyDown(event, ${i})" onfocus="window._currentEditableIndex=${i}">${it.description ? it.description : ''}</div>
+        <div class="li-desc" data-placeholder="Descripción del ítem..." contenteditable="${!isReadOnly}" oninput="updateLiRow(${i})" onkeydown="liDescKeyDown(event, ${i})" onpaste="handleDescPaste(event)" onfocus="window._currentEditableIndex=${i}">${it.description ? it.description : ''}</div>
       </td>
       <td style="width:80px"><input type="number" min="0" value="${it.qty||1}" oninput="updateLiRow(${i})" id="li-qty-${i}" ${isReadOnly ? 'disabled' : ''}></td>
       <td style="width:130px"><input type="number" min="0" step="0.01" value="${it.unitPrice||0}" oninput="updateLiRow(${i})" id="li-up-${i}" ${isReadOnly ? 'disabled' : ''}></td>
@@ -1146,43 +1222,30 @@ function renderBudgetForm(projectId, budgetId) {
       <!-- Header info -->
       <div class="bg-white border border-gray-200 rounded-2xl p-6">
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          ${!hasProject ? `
           <div class="form-group mb-0">
-            <label class="form-label">Nombre del Proyecto *</label>
-            <input id="b-project-name" class="form-input" value="${esc(budget?.projectName||'')}" placeholder="Ej: Evento Corporativo 2026">
+            <label class="form-label">Nombre del Proyecto${!hasProject ? ' *' : ''}</label>
+            <input id="b-project-name" class="form-input" value="${esc(hasProject ? existingProject.name : (budget?.projectName||''))}" placeholder="Ej: Evento Corporativo 2026">
           </div>
           <div class="form-group mb-0">
-            <label class="form-label">Cliente *</label>
+            <label class="form-label">Cliente${!hasProject ? ' *' : ''}</label>
             <select id="b-client" class="form-select">
               <option value="">Seleccionar cliente</option>
               ${clientSelectOptions}
             </select>
           </div>
           <div class="form-group mb-0">
-            <label class="form-label">Administración *</label>
+            <label class="form-label">Administración${!hasProject ? ' *' : ''}</label>
             <select id="b-admin" class="form-select">
-              ${Object.entries(ADMIN).map(([k,v]) => `<option value="${k}" ${(budget?.administration||'ARG')===k?'selected':''}>${v.flag} ${v.label} (${v.code})</option>`).join('')}
+              ${Object.entries(ADMIN).map(([k,v]) => `<option value="${k}" ${(hasProject ? existingProject.administration : (budget?.administration||'ARG'))===k?'selected':''}>${v.flag} ${v.label} (${v.code})</option>`).join('')}
             </select>
+            ${hasProject ? `<p class="text-xs text-amber-600 mt-1">Este cambio se aplica a TODO el proyecto "${esc(existingProject.name)}" (todos sus presupuestos, ingresos y totales), no solo a este presupuesto.</p>` : ''}
           </div>
-          ` : `
-          <div class="form-group mb-0">
-            <label class="form-label">Proyecto</label>
-            <p class="text-sm font-medium text-gray-700">${esc(existingProject.name)}</p>
-          </div>
-          <div class="form-group mb-0">
-            <label class="form-label">Cliente</label>
-            <p class="text-sm font-medium text-gray-700">${esc(existingProject.client||'—')}</p>
-          </div>
-          <div class="form-group mb-0">
-            <label class="form-label">Administración</label>
-            <p class="text-sm font-medium text-gray-700">${adm.flag} ${adm.label}</p>
-          </div>
-          `}
           <div class="form-group mb-0">
             <label class="form-label">Fecha del Presupuesto</label>
             <input id="b-date" type="date" class="form-input" value="${budget?.date||today()}">
           </div>
         </div>
+        ${hasProject ? `<p class="text-xs text-gray-400 mt-3">Nombre, cliente y administración pertenecen al proyecto "${esc(existingProject.name)}" — al guardar este presupuesto, también se actualiza el proyecto.</p>` : ''}
         ${!hasProject ? `
         <div class="mt-4">
           <div class="form-group mb-0">
@@ -1205,6 +1268,39 @@ function renderBudgetForm(projectId, budgetId) {
               <label class="inline-flex items-center"><input type="checkbox" id="b-iva-con" ${(budget?.iva==='con' || (budget?.administration||'ARG') === 'PERU') ? 'checked' : ''} onchange="toggleIVA('con')"> <span style="margin-left:8px">+${(budget?.administration||'ARG') === 'PERU' ? 'IGV' : 'IVA'}</span></label>
               <label class="inline-flex items-center"><input type="checkbox" id="b-iva-sin" ${budget?.iva==='sin' ? 'checked' : ''} onchange="toggleIVA('sin')"> <span style="margin-left:8px">Sin ${(budget?.administration||'ARG') === 'PERU' ? 'IGV' : 'IVA'}</span></label>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Datos del evento (opcionales, salen impresos en el PDF del presupuesto) -->
+      <div class="bg-white border border-gray-200 rounded-2xl p-6">
+        <h3 class="font-semibold text-gray-900 mb-4">Datos del Evento <span class="text-xs font-normal text-gray-400">(opcional, aparece en el PDF)</span></h3>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div class="form-group mb-0">
+            <label class="form-label">País</label>
+            <input id="b-country" class="form-input" value="${esc(budget?.country||'')}" placeholder="Ej: Argentina">
+          </div>
+          <div class="form-group mb-0">
+            <label class="form-label">Ciudad</label>
+            <input id="b-city" class="form-input" value="${esc(budget?.city||'')}" placeholder="Ej: Buenos Aires">
+          </div>
+          <div class="form-group mb-0">
+            <label class="form-label">Fecha del Evento</label>
+            <input id="b-event-date" type="date" class="form-input" value="${budget?.eventDate||''}">
+          </div>
+          <div class="form-group mb-0">
+            <label class="form-label">Fecha de Montaje</label>
+            <input id="b-setup-date" type="date" class="form-input" value="${budget?.setupDate||''}">
+          </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+          <div class="form-group mb-0">
+            <label class="form-label">Venue (nombre del lugar)</label>
+            <input id="b-venue-name" class="form-input" value="${esc(budget?.venueName||'')}" placeholder="Ej: Facultad de Derecho">
+          </div>
+          <div class="form-group mb-0">
+            <label class="form-label">Venue (dirección)</label>
+            <input id="b-venue-address" class="form-input" value="${esc(budget?.venueAddress||'')}" placeholder="Ej: Av. Pres. Figueroa Alcorta 2263">
           </div>
         </div>
       </div>
@@ -1563,7 +1659,7 @@ function renderBudgetForm(projectId, budgetId) {
         ${showApprovalCol ? `<td style="text-align:center;width:60px">
           <input type="checkbox" ${it.aprobado ? 'checked' : ''} ${isReadOnly ? 'disabled' : ''} onchange="toggleItemApproval(${i})" style="width:18px;height:18px;cursor:pointer">
         </td>` : ''}
-        <td><div class="li-desc" contenteditable="${!isReadOnly}" oninput="updateLiRow(${i})" onfocus="window._currentEditableIndex=${i}">${it.description ? it.description : ''}</div></td>
+        <td><div class="li-desc" contenteditable="${!isReadOnly}" oninput="updateLiRow(${i})" onpaste="handleDescPaste(event)" onfocus="window._currentEditableIndex=${i}">${it.description ? it.description : ''}</div></td>
         <td><input type="number" min="0" value="${it.qty||1}" oninput="updateLiRow(${i})" id="li-qty-${i}" ${isReadOnly ? 'disabled' : ''}></td>
         <!-- Unidad removed -->
         <td><input type="number" min="0" step="0.01" value="${it.unitPrice||0}" oninput="updateLiRow(${i})" id="li-up-${i}" ${isReadOnly ? 'disabled' : ''}></td>
@@ -1885,11 +1981,19 @@ window.saveBudgetForm = async function(projectId, budgetId) {
     const fxRateInput = document.getElementById('b-fx-rate');
     const exchangeRateToUSD = (fxRateInput && administration !== 'USA') ? (Number(fxRateInput.value) || undefined) : undefined;
 
+    // Datos del evento (opcionales): salen impresos en el PDF del presupuesto.
+    const country = document.getElementById('b-country')?.value.trim() || '';
+    const city = document.getElementById('b-city')?.value.trim() || '';
+    const eventDate = document.getElementById('b-event-date')?.value || '';
+    const setupDate = document.getElementById('b-setup-date')?.value || '';
+    const venueName = document.getElementById('b-venue-name')?.value.trim() || '';
+    const venueAddress = document.getElementById('b-venue-address')?.value.trim() || '';
+
     if (!items.length) { notify('Agregá al menos un ítem', 'warning'); return; }
 
     notify('Guardando presupuesto...', 'info');
 
-    let data = { date, status, notes, items, total, administration, exchangeRateToUSD };
+    let data = { date, status, notes, items, total, administration, exchangeRateToUSD, country, city, eventDate, setupDate, venueName, venueAddress };
 
     // Check if this budget has an associated project (either from parameter or previously approved)
     const hasAssociatedProject = !!projectId || window._budgetHasProject;
@@ -1916,6 +2020,43 @@ window.saveBudgetForm = async function(projectId, budgetId) {
       const existingBudget = DB.get('budgets', budgetId);
       if (existingBudget?.projectId) {
         data.projectId = existingBudget.projectId;
+      }
+    }
+
+    // Si el presupuesto ya pertenece a un proyecto, los campos Nombre/Cliente/Administración
+    // del formulario en realidad son los del PROYECTO (ver renderBudgetForm) — no se guardan
+    // en el presupuesto, se sincronizan directamente con el proyecto vinculado.
+    if (hasAssociatedProject && data.projectId) {
+      const linkedProject = DB.get('projects', data.projectId);
+      if (linkedProject) {
+        const newProjectName = document.getElementById('b-project-name')?.value.trim() || linkedProject.name;
+        const newClientName = document.getElementById('b-client')?.value.trim();
+        const newAdministration = document.getElementById('b-admin')?.value || linkedProject.administration;
+        const projectChanges = {};
+        if (newProjectName && newProjectName !== linkedProject.name) projectChanges.name = newProjectName;
+        if (newClientName && newClientName !== (linkedProject.client || '')) projectChanges.client = newClientName;
+        if (newAdministration && newAdministration !== linkedProject.administration) projectChanges.administration = newAdministration;
+
+        if (Object.keys(projectChanges).length) {
+          if (projectChanges.administration) {
+            const oldAdmLabel = ADMIN[linkedProject.administration]?.label || linkedProject.administration;
+            const newAdmLabel = ADMIN[projectChanges.administration]?.label || projectChanges.administration;
+            const confirmAdm = await Swal.fire({
+              icon: 'warning',
+              title: 'Cambiar la Administración del proyecto',
+              html: `Vas a cambiar la administración de <strong>${esc(linkedProject.name)}</strong> de <strong>${esc(oldAdmLabel)}</strong> a <strong>${esc(newAdmLabel)}</strong>.<br><br>Esto afecta el cálculo de IVA/IGV, la moneda y los totales de <strong>todos</strong> los presupuestos e ingresos de este proyecto, no solo de este presupuesto.<br><br>¿Confirmás el cambio?`,
+              showCancelButton: true,
+              confirmButtonText: 'Sí, cambiar',
+              cancelButtonText: 'Cancelar',
+              confirmButtonColor: '#dc2626',
+            });
+            if (!confirmAdm.isConfirmed) {
+              notify('Cambio cancelado. No se guardó ningún cambio.', 'info');
+              return;
+            }
+          }
+          await DB.update('projects', data.projectId, projectChanges);
+        }
       }
     }
 
@@ -2439,7 +2580,7 @@ function renderInvoiceForm(projectId, invoiceId) {
             </thead>
             <tbody id="inv-li-tbody">${items.map((it,i) => `
               <tr id="inv-li-row-${i}">
-                <td><div class="li-desc" contenteditable="true" oninput="updateInvRow(${i})" onkeydown="invDescKeyDown(event, ${i})" onfocus="window._currentInvEditableIndex=${i}">${it.description ? it.description : ''}</div></td>
+                <td><div class="li-desc" contenteditable="true" oninput="updateInvRow(${i})" onkeydown="invDescKeyDown(event, ${i})" onpaste="handleDescPaste(event)" onfocus="window._currentInvEditableIndex=${i}">${it.description ? it.description : ''}</div></td>
                 <td><input type="number" min="0" value="${it.qty||1}" oninput="updateInvRow(${i})" id="inv-qty-${i}"></td>
                 ${showUnit ? `<td><input type="text" value="${esc(it.unit||'')}" oninput="updateInvRow(${i})"></td>` : ''}
                 <td><input type="number" min="0" step="0.01" value="${it.unitPrice||0}" oninput="updateInvRow(${i})" id="inv-up-${i}"></td>
@@ -2495,9 +2636,9 @@ function renderInvoiceForm(projectId, invoiceId) {
     const i = window._invItems.length - 1;
     const tr = document.createElement('tr'); tr.id = `inv-li-row-${i}`;
     if (showUnit) {
-      tr.innerHTML = `<td><div class="li-desc" contenteditable="true" oninput="updateInvRow(${i})" onkeydown="invDescKeyDown(event, ${i})" onfocus="window._currentInvEditableIndex=${i}"></div></td><td><input type="number" min="0" value="1" oninput="updateInvRow(${i})"></td><td><input type="text" oninput="updateInvRow(${i})"></td><td><input type="number" min="0" step="0.01" value="0" oninput="updateInvRow(${i})"></td><td style="text-align:right;padding-right:12px;font-weight:600;color:#374151" id="inv-total-${i}">${fmtCurrency(0,'USA')}</td><td><button onclick="removeInvRow(${i})" class="btn btn-danger btn-icon btn-sm" style="padding:4px"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button></td>`;
+      tr.innerHTML = `<td><div class="li-desc" contenteditable="true" oninput="updateInvRow(${i})" onkeydown="invDescKeyDown(event, ${i})" onpaste="handleDescPaste(event)" onfocus="window._currentInvEditableIndex=${i}"></div></td><td><input type="number" min="0" value="1" oninput="updateInvRow(${i})"></td><td><input type="text" oninput="updateInvRow(${i})"></td><td><input type="number" min="0" step="0.01" value="0" oninput="updateInvRow(${i})"></td><td style="text-align:right;padding-right:12px;font-weight:600;color:#374151" id="inv-total-${i}">${fmtCurrency(0,'USA')}</td><td><button onclick="removeInvRow(${i})" class="btn btn-danger btn-icon btn-sm" style="padding:4px"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button></td>`;
     } else {
-      tr.innerHTML = `<td><div class="li-desc" contenteditable="true" oninput="updateInvRow(${i})" onkeydown="invDescKeyDown(event, ${i})" onfocus="window._currentInvEditableIndex=${i}"></div></td><td><input type="number" min="0" value="1" oninput="updateInvRow(${i})"></td><td><input type="number" min="0" step="0.01" value="0" oninput="updateInvRow(${i})"></td><td style="text-align:right;padding-right:12px;font-weight:600;color:#374151" id="inv-total-${i}">${fmtCurrency(0,'USA')}</td><td><button onclick="removeInvRow(${i})" class="btn btn-danger btn-icon btn-sm" style="padding:4px"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button></td>`;
+      tr.innerHTML = `<td><div class="li-desc" contenteditable="true" oninput="updateInvRow(${i})" onkeydown="invDescKeyDown(event, ${i})" onpaste="handleDescPaste(event)" onfocus="window._currentInvEditableIndex=${i}"></div></td><td><input type="number" min="0" value="1" oninput="updateInvRow(${i})"></td><td><input type="number" min="0" step="0.01" value="0" oninput="updateInvRow(${i})"></td><td style="text-align:right;padding-right:12px;font-weight:600;color:#374151" id="inv-total-${i}">${fmtCurrency(0,'USA')}</td><td><button onclick="removeInvRow(${i})" class="btn btn-danger btn-icon btn-sm" style="padding:4px"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button></td>`;
     }
     document.getElementById('inv-li-tbody').appendChild(tr);
     // Focus the new description editable and place caret at end
@@ -2971,19 +3112,21 @@ function renderTabHistory(project) {
 // ═══════════════════════════════════════════════════════════════
 // CONFIGURACIÓN
 // ═══════════════════════════════════════════════════════════════
-function renderSettings(section = 'company') {
+function renderSettings(section = 'company', extra) {
   setBreadcrumb([{ label: 'Configuración' }]);
   setActions('');
 
   const sections = [
     { key: 'company',    label: 'Empresa' },
+    { key: 'terms',      label: 'Condiciones' },
     { key: 'security',   label: 'Seguridad' },
     { key: 'clients',    label: 'Clientes' },
     { key: 'categories', label: 'Categorias de Gastos' },
-    { key: 'demo',       label: '📦 Datos de Ejemplo' },
   ];
 
-  const tabs = `<div class="flex flex-wrap gap-2 mb-6">
+  if (!sections.some(item => item.key === section)) section = 'company';
+
+  const tabs = `<div class="flex flex-wrap gap-2 ${section === 'terms' ? 'mb-2' : 'mb-6'}">
     ${sections.map(s => `
       <button class="btn ${section===s.key ? 'btn-primary' : 'btn-secondary'}" onclick="renderSettings('${s.key}')">${s.label}</button>
     `).join('')}
@@ -2991,12 +3134,18 @@ function renderSettings(section = 'company') {
 
   let body = '';
   if (section === 'company') body = renderCompanySettings();
+  if (section === 'terms') body = renderTermsSettings(extra);
   if (section === 'security') body = renderSecuritySettings();
   if (section === 'clients') body = renderClientSettings();
   if (section === 'categories') body = renderCategorySettings();
-  if (section === 'demo') body = renderDemoDataSettings();
 
-  setContent(`<div class="max-w-3xl mx-auto">${tabs}${body}</div>`);
+  // Algunas funciones de sección (p. ej. cuando la configuración aún no llegó)
+  // hacen su propio `setContent()` y retornan `undefined`. En ese caso no
+  // debemos sobrescribir lo que ya mostraron (spinner), así que salimos.
+  if (typeof body === 'undefined') return;
+
+  const containerWidth = section === 'terms' ? 'max-w-6xl' : 'max-w-3xl';
+  setContent(`<div class="${containerWidth} mx-auto">${tabs}${body}</div>`);
   // Populate session fields if present
   try {
     const enabled = String(localStorage.getItem('aurea_enable_inactivity_watch')) === 'true';
@@ -3117,8 +3266,9 @@ window.saveSecurityPin = async function() {
 
 function renderCompanySettings() {
   const cfg = DB.getConfig();
-  // Si la config aún no llegó (modo Firebase), mostrar estado de carga y reintentar al recibir datos
-  if (cfg === null) {
+  // `undefined` significa que Firebase todavía está cargando. `null` significa
+  // que aún no existe configuración y debe mostrarse el formulario vacío.
+  if (typeof cfg === 'undefined') {
     setContent(`
       <div class="max-w-3xl mx-auto">
         <div class="bg-white border border-gray-200 rounded-2xl p-6 text-center">
@@ -3134,17 +3284,26 @@ function renderCompanySettings() {
         if (ev?.detail?.collection === 'config') {
           window.removeEventListener('db-updated', onUpdate);
           // Re-renderizar cuando ya tengamos la config
-          renderCompanySettings();
+          renderSettings('company');
         }
       } catch (e) { /* ignore */ }
     };
     window.addEventListener('db-updated', onUpdate);
+    // Por si el evento ya se disparó antes de que registráramos el listener,
+    // comprobamos inmediatamente si la config ya está en cache y re-renderizamos.
+    try {
+      const maybe = DB.getConfig();
+      if (typeof maybe !== 'undefined') {
+        window.removeEventListener('db-updated', onUpdate);
+        renderSettings('company');
+      }
+    } catch (e) { /* ignore */ }
     return;
   }
 
-  const c = cfg.company || {};
+  const c = cfg?.company || {};
   return `
-    <div class="bg-white border border-gray-200 rounded-2xl p-6">
+    <div class="bg-white border border-gray-200 rounded-2xl p-5">
       <h3 class="font-semibold text-gray-900 mb-5">Datos de la Empresa</h3>
       
       <!-- Logo Upload -->
@@ -3168,6 +3327,7 @@ function renderCompanySettings() {
           ['company-address','Dirección', 'text', c.address || ''],
           ['company-address-2','Dirección (línea 2)','text', c.address2 || ''],
           ['company-city','Ciudad / Localidad','text',c.city||''],
+          ['company-website','Sitio web (sale en el pie de página del PDF, no en el membrete)','text',c.website||''],
           ['company-taxid','CUIT / Tax ID','text',c.taxId||''],
         ].map(([id,label,type,val]) => `
           <div class="form-group">
@@ -3212,12 +3372,155 @@ window.saveCompanySettings = function() {
     address: document.getElementById('company-address')?.value.trim() || '',
     address2: document.getElementById('company-address-2')?.value.trim() || '',
     city: document.getElementById('company-city')?.value.trim() || '',
+    website: document.getElementById('company-website')?.value.trim() || '',
     taxId: document.getElementById('company-taxid')?.value.trim() || '',
   };
   DB.setConfig(cfg);
   notify('Configuración guardada');
   // Refrescar la pestaña de empresa para reflejar los cambios inmediatamente
   try { renderSettings('company'); } catch (e) { /* ignore */ }
+};
+
+// [SECCIÓN: CONDICIONES — CONFIGURACIÓN]
+// ----------------------------------------------------------------------------
+// Pantalla para editar, SIN TOCAR CÓDIGO, el texto de "Condiciones Generales"
+// que se imprime en los presupuestos (PDF y vista previa) de cada
+// administración (Argentina / Perú / USA) por separado. Se guarda en
+// cfg.budgetTerms[administration] (texto simple, no HTML) y se usa desde
+// buildBudgetHtmlFragment — ver "[SECCIÓN: CONDICIONES GENERALES]" y
+// "[SECCIÓN: TEXTO LEGAL]" más abajo en este archivo para el detalle de
+// prioridades (Notas del presupuesto > este texto > texto por defecto).
+function renderTermsSettings(admin) {
+  const cfg = DB.getConfig();
+  if (typeof cfg === 'undefined') {
+    setContent(`
+      <div class="max-w-3xl mx-auto">
+        <div class="bg-white border border-gray-200 rounded-2xl p-6 text-center">
+          <div class="spinner mx-auto" style="width:36px;height:36px;border-width:3px;margin-bottom:12px"></div>
+          <div class="text-gray-600">Cargando configuración...</div>
+        </div>
+      </div>
+    `);
+    const onUpdate = (ev) => {
+      try {
+        if (ev?.detail?.collection === 'config') {
+          window.removeEventListener('db-updated', onUpdate);
+          renderSettings('terms', admin);
+        }
+      } catch (e) { /* ignore */ }
+    };
+    window.addEventListener('db-updated', onUpdate);
+    // Por si el evento ya se disparó antes de que registráramos el listener,
+    // comprobamos inmediatamente si la config ya está en cache y re-renderizamos.
+    try {
+      const maybe = DB.getConfig();
+      if (typeof maybe !== 'undefined') {
+        window.removeEventListener('db-updated', onUpdate);
+        renderSettings('terms', admin);
+      }
+    } catch (e) { /* ignore */ }
+    return;
+  }
+
+  // Recuerda cuál administración se estaba editando (para no volver siempre a ARG
+  // al guardar/refrescar la pantalla).
+  const activeAdmin = (admin && ADMIN[admin]) ? admin : (window._termsSettingsAdmin && ADMIN[window._termsSettingsAdmin] ? window._termsSettingsAdmin : 'ARG');
+  window._termsSettingsAdmin = activeAdmin;
+
+  const savedText = (cfg?.budgetTerms || {})[activeAdmin];
+  const isCustom = savedText != null && savedText !== '';
+  const textareaValue = isCustom ? savedText : (DEFAULT_BUDGET_TERMS_TEXT[activeAdmin] || '');
+  const adm = ADMIN[activeAdmin];
+
+  return `
+    <div class="bg-white border border-gray-200 rounded-2xl p-6">
+      <h3 class="font-semibold text-gray-900 mb-2">Condiciones Generales del Presupuesto</h3>
+      <p class="text-sm text-gray-600 mb-3">
+        Este texto se imprime en la sección "Condiciones Generales" de los presupuestos (PDF y
+        vista previa) para la administración elegida abajo, siempre que ese presupuesto no tenga
+        su propio texto manual cargado en "Notas". Cada administración tiene su propio texto —
+        un cambio acá NO afecta a las otras dos.
+      </p>
+
+      <div class="flex flex-wrap gap-2 mb-3">
+        ${['ARG','PERU','USA'].map(code => `
+          <button class="btn ${activeAdmin===code ? 'btn-primary' : 'btn-secondary'}" onclick="renderSettings('terms','${code}')">${ADMIN[code].flag} ${ADMIN[code].label}</button>
+        `).join('')}
+      </div>
+
+      ${isCustom ? '' : `<div class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">Todavía no se guardó un texto propio para ${esc(adm.label)} — se está mostrando el texto por defecto de la app. Podés editarlo y guardarlo cuando quieras.</div>`}
+
+      <div class="form-group">
+        <label class="form-label">Texto (${esc(adm.label)})</label>
+        <div class="flex items-center gap-2 mb-2">
+          <button type="button" class="btn btn-secondary btn-sm" onmousedown="event.preventDefault()" onclick="toggleTermsBold()" title="Negrita" aria-label="Aplicar o quitar negrita">
+            <span style="font-weight:700;font-size:15px;line-height:1">B</span>
+          </button>
+          <span class="text-xs text-gray-500">Seleccioná el texto y presioná B para aplicar o quitar negrita.</span>
+        </div>
+        <div id="terms-editor" class="form-input" contenteditable="true" role="textbox" aria-multiline="true" style="min-height:280px;max-height:420px;overflow-y:auto;font-family:inherit;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere">${termsPlainTextToEditorHtml(textareaValue)}</div>
+        
+      </div>
+
+      <div class="flex flex-wrap gap-2 mt-4">
+        <button class="btn btn-primary" onclick="saveBudgetTermsSettings('${activeAdmin}')">Guardar cambios</button>
+        <button class="btn btn-secondary" onclick="resetBudgetTermsSettings('${activeAdmin}')">Restaurar texto por defecto</button>
+      </div>
+    </div>
+  `;
+}
+
+window.toggleTermsBold = function() {
+  const editor = document.getElementById('terms-editor');
+  if (!editor) return;
+  editor.focus();
+  document.execCommand('bold', false, null);
+};
+
+function termsPlainTextToEditorHtml(text) {
+  return esc(String(text || ''))
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\r?\n/g, '<br>');
+}
+
+function termsEditorToPlainText(editor) {
+  const serialize = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || '';
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+
+    const tag = node.tagName.toLowerCase();
+    const content = Array.from(node.childNodes).map(serialize).join('');
+    if (tag === 'br') return '\n';
+    if (tag === 'strong' || tag === 'b') return `**${content}**`;
+    if (tag === 'div' || tag === 'p') return `${content}\n`;
+    return content;
+  };
+
+  return Array.from(editor.childNodes)
+    .map(serialize)
+    .join('')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+window.saveBudgetTermsSettings = function(admin) {
+  const cfg = DB.getConfig() || {};
+  cfg.budgetTerms = cfg.budgetTerms || {};
+  const editor = document.getElementById('terms-editor');
+  const text = editor ? termsEditorToPlainText(editor) : '';
+  cfg.budgetTerms[admin] = text;
+  DB.setConfig(cfg);
+  notify(`Condiciones guardadas para ${ADMIN[admin]?.label || admin}`);
+  try { renderSettings('terms', admin); } catch (e) { /* ignore */ }
+};
+
+window.resetBudgetTermsSettings = function(admin) {
+  const cfg = DB.getConfig() || {};
+  if (cfg.budgetTerms) delete cfg.budgetTerms[admin];
+  DB.setConfig(cfg);
+  notify('Se restauró el texto por defecto');
+  try { renderSettings('terms', admin); } catch (e) { /* ignore */ }
 };
 
 function renderClientSettings() {
@@ -3560,6 +3863,192 @@ window.clearDemoDataWithConfirm = async function() {
 // PDF — PRESUPUESTO
 // ═══════════════════════════════════════════════════════════════
 // Build HTML fragment used for budget PDF and preview
+// ============================================================================
+// [SECCIÓN: TEXTO LEGAL] — CONDICIONES GENERALES POR DEFECTO — PRESUPUESTOS (PDF y vista previa)
+// ----------------------------------------------------------------------------
+// Este texto se imprime en la sección "Condiciones Generales" del presupuesto
+// SOLO cuando el campo "Notas / Condiciones / Observaciones" del presupuesto
+// está vacío. Si el usuario carga texto manual en ese campo desde la app,
+// ese texto tiene prioridad y se muestra en su lugar (tal cual lo escribió).
+//
+// NOVEDAD: ya NO hace falta tocar código para cambiar este texto. Ahora se
+// puede escribir/editar directamente desde la app, en Configuración →
+// Condiciones, un cuadro de texto por administración (Argentina/Perú/USA).
+// Ver más abajo "[SECCIÓN: CONDICIONES — CONFIGURACIÓN]" (renderTermsSettings)
+// para esa pantalla, y "termsPlainTextToHtml" para cómo se convierte el texto
+// escrito por el usuario en el HTML que se imprime en el PDF.
+//
+// Los strings DEFAULT_BUDGET_TERMS_TEXT de más abajo son el texto que se
+// muestra la PRIMERA vez que alguien abre esa pantalla (antes de guardar
+// nada propio) y lo que queda si se aprieta "Restaurar texto por defecto".
+// Para cambiar el texto legal por defecto sin tocar código, ahora ALCANZA
+// con editarlo desde Configuración → Condiciones. Si igual se lo quiere
+// cambiar acá (por ejemplo, para actualizar el valor que trae la app antes
+// de que nadie lo haya personalizado), es el mismo formato que se usa en la
+// pantalla de Configuración: cada párrafo separado por una línea en blanco,
+// y **doble asterisco** para negrita — NO hace falta escribir HTML.
+// ============================================================================
+function _budgetTermsParagraph(html, marginBottom) {
+  // page-break-inside:avoid (+ break-inside, el equivalente moderno) evita que html2pdf
+  // corte un párrafo de Condiciones Generales justo por la mitad entre dos páginas.
+  return `<p style="font-size:13px;color:#475569;line-height:1.6;margin:0 0 ${marginBottom}px;page-break-inside:avoid;break-inside:avoid">${html}</p>`;
+}
+
+// termsPlainTextToHtml: convierte el texto simple que escribe el usuario (en
+// Configuración → Condiciones, o en DEFAULT_BUDGET_TERMS_TEXT de abajo) en el
+// HTML con estilo que se imprime en el PDF.
+//   - Una línea en blanco separa un párrafo del siguiente.
+//   - Un solo salto de línea DENTRO de un párrafo se respeta como <br> (salto
+//     de línea simple, sin espacio extra) — útil para "Título" en una línea y
+//     el detalle en la línea de abajo, como un mismo bloque.
+//   - **texto entre doble asterisco** se muestra en negrita.
+// El texto se escapa primero (esc) así que no se puede "inyectar" HTML desde
+// este cuadro — solo se interpretan los ** de negrita, todo lo demás se
+// muestra tal cual se escribió, ni siquiera si el usuario escribe <strong> a mano.
+function termsPlainTextToHtml(text) {
+  if (!text) return '';
+  const paragraphs = String(text).replace(/\r\n/g, '\n').split(/\n\s*\n+/).map(p => p.trim()).filter(Boolean);
+  return paragraphs.map((p, i) => {
+    const escaped = esc(p).replace(/\n/g, '<br>');
+    const bold = escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    const marginBottom = i === paragraphs.length - 1 ? 0 : 12;
+    return _budgetTermsParagraph(bold, marginBottom);
+  }).join('');
+}
+
+// Texto por defecto en formato simple (el mismo que ve/edita el usuario en
+// Configuración → Condiciones). Se convierte a HTML on-the-fly con
+// termsPlainTextToHtml — no son strings de HTML como DEFAULT_BUDGET_TERMS de
+// abajo (ese objeto se mantiene tal cual, como respaldo, por compatibilidad).
+const DEFAULT_BUDGET_TERMS_TEXT = {
+  ARG: `EL Presupuesto solo incluye los items detallados en el mismo. Los valores se encuentran expresados en pesos argentinos.
+
+**Modalidad de Pago**
+50% Adelantado - 50% antes del montaje
+
+**Método de Pago**
+Tranferencia Bancaria Vendor Internacional **AUREA TECHNICAL ART L.L.C**
+
+**Personal:** Todo el personal y equipamiento cuenta con seguros y ART de trabajo. En caso de necesitar una cláusula de No Repetición por un monto puntual, deben enviarnos un correo con los datos del beneficiario y requisitos, para efectuar los seguros correspondientes. Los mismos estarán incluidos en el presupuesto. El presupuesto incluye viáticos, comidas, traslados del personal.
+
+**Confidencialidad:** Esta Oferta, sus términos y toda información a la que el CLIENTE tenga acceso, será considerada información confidencial, y requerirá a sus empleados, contratistas y asesores que también cumplan con dicha obligación de confidencialidad, excepto que Aurea Technical Art la autorice expresamente y por escrito a revelar la información a terceros. La información confidencial no podrá ser transmitida a terceras empresas o personas, especialmente a empresas que compitan con Aurea Technical Art o tengan actividad similar.`,
+  PERU: `EL Presupuesto solo incluye los items detallados en el mismo. Los valores se encuentran expresados en soles peruanos.
+
+**Modalidad de Pago**
+50% Adelantado - 50% antes del montaje
+
+**Método de Pago**
+Tranferencia Bancaria Vendor Internacional **AUREA TECHNICAL ART L.L.C**
+
+**Personal:** Todo el personal y equipamiento cuenta con seguros y ART de trabajo. En caso de necesitar una cláusula de No Repetición por un monto puntual, deben enviarnos un correo con los datos del beneficiario y requisitos, para efectuar los seguros correspondientes. Los mismos estarán incluidos en el presupuesto. El presupuesto incluye viáticos, comidas, traslados del personal.
+
+**Confidencialidad:** Esta Oferta, sus términos y toda información a la que el CLIENTE tenga acceso, será considerada información confidencial, y requerirá a sus empleados, contratistas y asesores que también cumplan con dicha obligación de confidencialidad, excepto que Aurea Technical Art la autorice expresamente y por escrito a revelar la información a terceros. La información confidencial no podrá ser transmitida a terceras empresas o personas, especialmente a empresas que compitan con Aurea Technical Art o tengan actividad similar.`,
+  // Traducción de referencia — revisar/ajustar la redacción legal si hace falta.
+  USA: `This Quote only includes the items detailed herein. Amounts are expressed in US dollars.
+
+**Payment Terms**
+50% Deposit - 50% before load-in
+
+**Payment Method**
+International Wire Transfer to **AUREA TECHNICAL ART L.L.C**
+
+**Personnel:** All personnel and equipment are covered by insurance and workers' comp. If a Non-Compete clause is required for a specific amount, please send us the beneficiary's details and requirements so the corresponding insurance can be arranged. These will be included in the quote. The quote includes staff per diems, meals, and transportation.
+
+**Confidentiality:** This Offer, its terms, and any information the CLIENT has access to will be considered confidential, and CLIENT shall require its employees, contractors, and advisors to comply with this confidentiality obligation as well, except where Aurea Technical Art expressly authorizes in writing the disclosure of information to third parties. Confidential information may not be shared with third-party companies or individuals, particularly companies that compete with Aurea Technical Art or have similar activities.`,
+};
+
+// DEFAULT_BUDGET_TERMS (HTML ya armado) — se mantiene como último respaldo,
+// por si algún día termsPlainTextToHtml/DEFAULT_BUDGET_TERMS_TEXT no están
+// disponibles. En el uso normal, buildBudgetHtmlFragment ahora arma este
+// mismo texto a partir de DEFAULT_BUDGET_TERMS_TEXT (ver más abajo).
+const DEFAULT_BUDGET_TERMS = {
+  ARG: [
+    _budgetTermsParagraph('EL Presupuesto solo incluye los items detallados en el mismo. Los valores se encuentran expresados en pesos argentinos.', 12),
+    _budgetTermsParagraph('<strong>Modalidad de Pago</strong>', 4),
+    _budgetTermsParagraph('50% Adelantado - 50% antes del montaje', 12),
+    _budgetTermsParagraph('<strong>Método de Pago</strong>', 4),
+    _budgetTermsParagraph('Tranferencia Bancaria Vendor Internacional <strong>AUREA TECHNICAL ART L.L.C</strong>', 12),
+    _budgetTermsParagraph('<strong>Personal:</strong> Todo el personal y equipamiento cuenta con seguros y ART de trabajo. En caso de necesitar una cláusula de No Repetición por un monto puntual, deben enviarnos un correo con los datos del beneficiario y requisitos, para efectuar los seguros correspondientes. Los mismos estarán incluidos en el presupuesto. El presupuesto incluye viáticos, comidas, traslados del personal.', 12),
+    _budgetTermsParagraph('<strong>Confidencialidad:</strong> Esta Oferta, sus términos y toda información a la que el CLIENTE tenga acceso, será considerada información confidencial, y requerirá a sus empleados, contratistas y asesores que también cumplan con dicha obligación de confidencialidad, excepto que Aurea Technical Art la autorice expresamente y por escrito a revelar la información a terceros. La información confidencial no podrá ser transmitida a terceras empresas o personas, especialmente a empresas que compitan con Aurea Technical Art o tengan actividad similar.', 0),
+  ].join(''),
+  PERU: [
+    _budgetTermsParagraph('EL Presupuesto solo incluye los items detallados en el mismo. Los valores se encuentran expresados en soles peruanos.', 12),
+    _budgetTermsParagraph('<strong>Modalidad de Pago</strong>', 4),
+    _budgetTermsParagraph('50% Adelantado - 50% antes del montaje', 12),
+    _budgetTermsParagraph('<strong>Método de Pago</strong>', 4),
+    _budgetTermsParagraph('Tranferencia Bancaria Vendor Internacional <strong>AUREA TECHNICAL ART L.L.C</strong>', 12),
+    _budgetTermsParagraph('<strong>Personal:</strong> Todo el personal y equipamiento cuenta con seguros y ART de trabajo. En caso de necesitar una cláusula de No Repetición por un monto puntual, deben enviarnos un correo con los datos del beneficiario y requisitos, para efectuar los seguros correspondientes. Los mismos estarán incluidos en el presupuesto. El presupuesto incluye viáticos, comidas, traslados del personal.', 12),
+    _budgetTermsParagraph('<strong>Confidencialidad:</strong> Esta Oferta, sus términos y toda información a la que el CLIENTE tenga acceso, será considerada información confidencial, y requerirá a sus empleados, contratistas y asesores que también cumplan con dicha obligación de confidencialidad, excepto que Aurea Technical Art la autorice expresamente y por escrito a revelar la información a terceros. La información confidencial no podrá ser transmitida a terceras empresas o personas, especialmente a empresas que compitan con Aurea Technical Art o tengan actividad similar.', 0),
+  ].join(''),
+  // Traducción de referencia — revisar/ajustar la redacción legal si hace falta.
+  USA: [
+    _budgetTermsParagraph('This Quote only includes the items detailed herein. Amounts are expressed in US dollars.', 12),
+    _budgetTermsParagraph('<strong>Payment Terms</strong>', 4),
+    _budgetTermsParagraph('50% Deposit - 50% before load-in', 12),
+    _budgetTermsParagraph('<strong>Payment Method</strong>', 4),
+    _budgetTermsParagraph('International Wire Transfer to <strong>AUREA TECHNICAL ART L.L.C</strong>', 12),
+    _budgetTermsParagraph('<strong>Personnel:</strong> All personnel and equipment are covered by insurance and workers\' comp. If a Non-Compete clause is required for a specific amount, please send us the beneficiary\'s details and requirements so the corresponding insurance can be arranged. These will be included in the quote. The quote includes staff per diems, meals, and transportation.', 12),
+    _budgetTermsParagraph('<strong>Confidentiality:</strong> This Offer, its terms, and any information the CLIENT has access to will be considered confidential, and CLIENT shall require its employees, contractors, and advisors to comply with this confidentiality obligation as well, except where Aurea Technical Art expressly authorizes in writing the disclosure of information to third parties. Confidential information may not be shared with third-party companies or individuals, particularly companies that compete with Aurea Technical Art or have similar activities.', 0),
+  ].join(''),
+};
+
+// ============================================================================
+// [SECCIÓN: MAPA DEL PDF] — GUÍA RÁPIDA PARA EDITAR EL PDF/VISTA PREVIA DE PRESUPUESTOS
+// ----------------------------------------------------------------------------
+// Esta función (buildBudgetHtmlFragment) arma el HTML completo del presupuesto.
+// Se usa TANTO para la vista previa en pantalla como para el PDF exportado —
+// es la misma función en los dos casos, así que cualquier cambio acá se ve
+// reflejado en ambos lugares automáticamente.
+//
+// Para encontrar rápido cada parte, buscar (Ctrl+F / Cmd+F) estas etiquetas,
+// tal cual están escritas, en ESTE archivo:
+//
+//   [SECCIÓN: HEADER]              → nombre/datos de la empresa, logo, número
+//                                     de presupuesto, fecha, badge de admin.
+//   [SECCIÓN: DATOS DEL EVENTO]    → las 4 cajitas: País, Ciudad, Fecha del
+//                                     Evento, Fecha de Montaje.
+//   [SECCIÓN: CLIENTE/PROYECTO/VENUE] → las 3 cajitas debajo de "Datos del evento".
+//   [SECCIÓN: TABLA DE ITEMS]      → la tabla con Descripción/Cant./P.Unitario/Total.
+//   [SECCIÓN: TOTAL]               → el cuadro naranja con el total del presupuesto.
+//   [SECCIÓN: IGV PERÚ]            → el cuadrito "+IGV" que sale solo en presupuestos de Perú.
+//   [SECCIÓN: CONDICIONES GENERALES] → el texto legal (ver también DEFAULT_BUDGET_TERMS
+//                                     más arriba en este archivo, ahí se edita el TEXTO).
+//   [SECCIÓN: FOOTER]              → la línea con la URL del sitio web, al pie de la página.
+//
+// Tips generales para cambios de diseño:
+//   - Los colores están escritos en hexadecimal dentro de style="...". El naranja
+//     Aurea es #de591f, y aparece en la línea divisoria del header y en el cuadro
+//     del TOTAL. Los colores por administración (ARG/PERU/USA) están en el objeto
+//     ADMIN, al principio de este archivo (buscar "const ADMIN").
+//   - Los espacios entre bloques se controlan con margin-bottom / margin-top /
+//     padding en cada style="...". Un número más alto = más espacio.
+//   - Después de cualquier cambio, correr `node --check app.js` en la terminal
+//     para confirmar que no quedó ningún error de sintaxis antes de probarlo
+//     en la app.
+//
+// TAMAÑOS DE LETRA (font-size) — dónde tocar cada uno:
+//   Todos los tamaños de letra de este PDF están escritos en pixeles, como
+//   font-size:12px dentro de cada style="...". Para achicar o agrandar un
+//   texto puntual, buscar (Ctrl+F) el texto o la etiqueta de sección donde
+//   está, y cambiar el número que acompaña a font-size. Como referencia,
+//   estos son los tamaños actuales de cada parte (de más chico a más grande):
+//     9px  → las etiquetas en mayúscula tipo "CLIENTE", "PAÍS", "CANT." (las
+//            que están arriba de cada cajita, en gris).
+//     10px → encabezados de la tabla de ítems (Descripción/Cant./P.Unitario/
+//            Total) y el título "PRESUPUESTO"/"QUOTE" arriba del número.
+//     11px → texto chico del footer y el "+IGV" en Perú.
+//     12px → el valor dentro de las 4 cajitas de "Datos del Evento", los
+//            datos de la empresa (dirección/teléfono/mail) y las celdas de
+//            la tabla de ítems (cantidad, precio unitario, descripción).
+//     13px → total de cada fila en la tabla de ítems, subtotal/IVA, fecha.
+//     14px → Cliente / Proyecto / Venue (los valores, no las etiquetas).
+//     20px → el nombre de la empresa (arriba a la izquierda).
+//     26px → el número de presupuesto (arriba a la derecha del centro).
+//     28px → el monto grande del cuadro naranja de TOTAL.
+//   Regla práctica: para que un texto entre en un solo renglón, primero
+//   probar bajando 1-2px el font-size antes de tocar otra cosa (padding,
+//   ancho de columna, etc.) — normalmente alcanza con eso.
+// ============================================================================
 window.buildBudgetHtmlFragment = function(budget) {
   const project = budget.projectId ? DB.get('projects', budget.projectId) : null;
   const clientName = budget.clientName || project?.client || '—';
@@ -3576,13 +4065,16 @@ window.buildBudgetHtmlFragment = function(budget) {
   const total = pdfBreakdown.total;
   const approvedTotal = calcApprovedTotal(budget.items || [], administration, budgetIvaModeForPdf);
   const isPartialApproval = budget.status === 'aprobado-parcial';
-  const showApprovalCol = budget.status !== 'borrador';
-  const statusMeta = (BUDGET_STATUS && BUDGET_STATUS[budget.status]) || { badge: '', label: (budget.status || '') };
   const isEnglish = administration === 'USA';
   const t = {
     title: isEnglish ? 'QUOTE' : 'PRESUPUESTO',
     client: isEnglish ? 'Client' : 'Cliente',
     project: isEnglish ? 'Project' : 'Proyecto',
+    venue: 'Venue',
+    country: isEnglish ? 'Country' : 'País',
+    city: isEnglish ? 'City' : 'Ciudad',
+    eventDate: isEnglish ? 'Event Date' : 'Fecha del Evento',
+    setupDate: isEnglish ? 'Setup Date' : 'Fecha de Montaje',
     date: isEnglish ? 'Date' : 'Fecha',
     description: isEnglish ? 'Description' : 'Descripción',
     qty: isEnglish ? 'Qty' : 'Cant.',
@@ -3591,75 +4083,147 @@ window.buildBudgetHtmlFragment = function(budget) {
     totalBudget: isEnglish ? 'QUOTE TOTAL' : 'TOTAL PRESUPUESTO',
     approvedTotal: isEnglish ? 'APPROVED TOTAL' : 'TOTAL APROBADO',
     termsConditions: isEnglish ? 'TERMS & CONDITIONS' : 'CONDICIONES Y OBSERVACIONES',
+    conditionsHeading: isEnglish ? 'General Terms' : 'Condiciones Generales',
     generatedOn: isEnglish ? 'Document generated on' : 'Documento generado el',
   };
+  const displayNumber = formatBudgetRef(budget.number ?? budget.budgetNumber ?? '(sin número)');
+  // eventBoxHTML: genera cada una de las 4 cajitas grises de "Datos del Evento"
+  // (País/Ciudad/Fecha del Evento/Fecha de Montaje). "label" es el font-size:9px
+  // de arriba (la etiqueta en mayúscula) y "value" es el font-size:12px de abajo
+  // (el dato en sí). "padding:12px" es el aire interno de la cajita — si el
+  // texto no entra en un renglón, primero probar bajando el font-size del value
+  // (12px) 1px antes de achicar el padding.
+  const eventBoxHTML = (label, value) => `
+    <div style="background:#F9F9F9;border:1px solid #E7E7E7;border-radius:10px;padding:12px">
+      <p style="font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;font-weight:700;margin:0 0 5px;white-space:nowrap">${label}</p>
+      <p style="font-size:12px;font-weight:600;margin:0;color:#1e293b;white-space:nowrap">${value ? esc(value) : '—'}</p>
+    </div>
+  `;
 
   return `
-    <div style="font-family:'Inter',Arial,sans-serif;max-width:750px;margin:0 auto;padding:40px;color:#1e293b">
-      <!-- Header -->
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid ${adm.flagColor};padding-bottom:20px;margin-bottom:30px">
-        <div style="flex:1">
-          ${comp.logo ? `<img src="${comp.logo}" style="max-width:150px;max-height:80px;margin-bottom:12px;object-fit:contain" />` : ''}
-          <h1 style="font-size:28px;font-weight:800;color:${adm.flagColor};margin:0">${esc(comp.name||'Aurea Technical Art')}</h1>
-          ${comp.tagline ? `<p style="color:#374151;font-size:13px;margin:6px 0;font-weight:600">${esc(comp.tagline)}</p>` : ''}
-          ${comp.address ? `<p style="color:#64748b;font-size:12px;margin-top:6px">${esc(comp.address)}</p>` : ''}
-          ${comp.address2 ? `<p style="color:#64748b;font-size:12px;margin:2px 0">${esc(comp.address2)}</p>` : ''}
-          ${comp.city ? `<p style="color:#64748b;font-size:12px;margin:2px 0">${esc(comp.city)}</p>` : ''}
-          ${comp.email ? `<p style="color:#64748b;font-size:12px;margin:2px 0">${esc(comp.email)}</p>` : ''}
-          ${comp.phone ? `<p style="color:#64748b;font-size:12px;margin:2px 0">${esc(comp.phone)}</p>` : ''}
+    <div style="font-family:'Aktiv Grotesk';max-width:750px;margin:0 auto;padding:40px;color:#1e293b">
+      <!-- [SECCIÓN: HEADER]
+           Header alineado por ABAJO: izquierda = datos de la empresa (nombre en negro;
+           orden Dirección, Dirección línea 2, Teléfono, Mail — la URL del sitio web NO va
+           acá, va en el footer); centro = PRESUPUESTO + número, centrado respecto a TODA
+           la página (no respecto a lo que sobra entre la izquierda y la derecha); derecha
+           = logo, fecha y badge de administración apilados. El número queda a la misma
+           altura que la última línea de la izquierda (Mail) y de la derecha (badge), como
+           pidió el cliente.
+           OJO: tanto el bloque central (PRESUPUESTO+número) como la columna derecha
+           (logo+fecha+badge) van con position:absolute — NO son parte del flex de arriba.
+           Esto NO es capricho, son dos problemas distintos que ya salieron en producción:
+           1) El bloque central necesita centrarse respecto al ANCHO TOTAL de la página.
+              Si fuera un simple hijo del flex (aunque tenga text-align:center) queda
+              centrado solo en el espacio que le sobra entre la columna izquierda y la
+              derecha — que casi nunca es simétrico — y el número sale corrido hacia un
+              costado. Por eso va con left:50%;transform:translateX(-50%) sobre el wrapper
+              con position:relative (que sí mide el ancho completo).
+           2) La columna derecha con la imagen del logo: html2canvas (el motor que arma el
+              PDF) mide mal la altura de una imagen dentro de un contenedor con
+              align-items:end/flex-end/grid — el logo terminaba "flotando" fuera de lugar
+              SOLO en el PDF exportado (en la vista previa del navegador se veía bien).
+           Si en el futuro hay que volver a tocar esta zona: mantener ambos bloques en
+           position:absolute, y probar siempre el PDF exportado (no solo la vista previa)
+           antes de dar el cambio por bueno — los dos bugs de arriba NO se ven en la vista
+           previa, solo en el PDF. -->
+      <div style="position:relative;margin-bottom:24px">
+        <div style="display:flex;gap:20px;border-bottom:3px solid #de591f;padding-bottom:14px">
+          <div style="flex:1">
+            <h1 style="font-size:20px;font-weight:800;color:#000;margin:0 0 4px">${esc(comp.name||'Aurea Technical Art')}</h1>
+            ${comp.tagline ? `<p style="color:#374151;font-size:13px;margin:0 0 2px;font-weight:600">${esc(comp.tagline)}</p>` : ''}
+            ${comp.address ? `<p style="color:#64748b;font-size:12px;margin:0 0 1px;line-height:1.3">${esc(comp.address)}</p>` : ''}
+            ${comp.address2 ? `<p style="color:#64748b;font-size:12px;margin:0 0 1px;line-height:1.3">${esc(comp.address2)}</p>` : ''}
+            ${comp.phone ? `<p style="color:#64748b;font-size:12px;margin:0 0 1px;line-height:1.3">${esc(comp.phone)}</p>` : ''}
+            ${comp.email ? `<p style="color:#64748b;font-size:12px;margin:0;line-height:1.3">${esc(comp.email)}</p>` : ''}
+          </div>
+          <div style="flex:0 0 190px"></div>
         </div>
-          <div style="text-align:right">
-            <h2 style="font-size:20px;font-weight:700;color:#334155;margin:0">${t.title}</h2>
-            ${(() => { const displayNumber = formatBudgetRef(budget.number ?? budget.budgetNumber ?? '(sin número)'); return `<p style="font-size:24px;font-weight:800;color:${adm.flagColor};margin:4px 0">${displayNumber}</p>` })()}
-            <p style="color:#64748b;font-size:13px">${t.date}: ${fmtDate(budget.date)}</p>
+        <div style="position:absolute;left:50%;transform:translateX(-50%);bottom:14px;text-align:center;white-space:nowrap">
+          <p style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 2px">${t.title}</p>
+          <p style="font-size:26px;font-weight:800;color:#000;margin:0">${displayNumber}</p>
+        </div>
+        <div style="position:absolute;right:0;bottom:14px;text-align:right;width:190px">
+          ${comp.logo ? `<img src="${comp.logo}" style="width:190px;height:auto;max-height:78px;object-fit:contain;display:block;margin-left:auto" />` : ''}
+          <p style="color:#64748b;font-size:13px;margin:8px 0 0">${t.date}: ${fmtDate(budget.date)}</p>
           <div style="margin-top:8px">
-            <span style="background:${statusMeta.badge.includes('green')?'#dcfce7':statusMeta.badge.includes('yellow')?'#fef3c7':statusMeta.badge.includes('blue')?'#dbeafe':'#f1f5f9'};color:${statusMeta.badge.includes('green')?'#16a34a':statusMeta.badge.includes('yellow')?'#ca8a04':statusMeta.badge.includes('blue')?'#2563eb':'#64748b'};padding:4px 14px;border-radius:20px;font-size:12px;font-weight:600">${statusMeta.label||budget.status}</span>
+            <span style="display:inline-block;background:${adm.flagColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;white-space:nowrap">${adm.flag} ${adm.label} · ${adm.code}</span>
           </div>
         </div>
       </div>
 
-      <!-- Client + Project -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:30px">
-        <div style="background:#F9F9F9;border:1px solid #E7E7E7;border-radius:10px;padding:18px">
-          <p style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;font-weight:700;margin:0 0 8px">${t.client}</p>
-          <p style="font-size:18px;font-weight:700;margin:0;color:#1e293b">${esc(clientName)}</p>
+      <!-- [SECCIÓN: DATOS DEL EVENTO] (país, ciudad, fecha del evento, fecha de montaje) -->
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:20px">
+        ${eventBoxHTML(t.country, budget.country)}
+        ${eventBoxHTML(t.city, budget.city)}
+        ${eventBoxHTML(t.eventDate, budget.eventDate ? fmtDate(budget.eventDate) : '')}
+        ${eventBoxHTML(t.setupDate, budget.setupDate ? fmtDate(budget.setupDate) : '')}
+      </div>
+
+      <!-- [SECCIÓN: CLIENTE/PROYECTO/VENUE]
+           Fuente del valor (Cliente/Proyecto/Venue) achicada de 18px a 14px — a 18px y en
+           negrita, nombres largos (de cliente o proyecto) ocupaban 3-4 renglones y hacían
+           el PDF innecesariamente largo. 14px sigue siendo bien legible y entra en menos
+           líneas. Si hace falta ajustar de nuevo, tocar el font-size de estos 3 bloques. -->
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:24px">
+        <div style="background:#F9F9F9;border:1px solid #E7E7E7;border-radius:10px;padding:14px">
+          <p style="font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;font-weight:700;margin:0 0 6px">${t.client}</p>
+          <p style="font-size:14px;font-weight:700;margin:0;line-height:1.3;color:#1e293b">${esc(clientName)}</p>
         </div>
-        <div style="background:#F9F9F9;border:1px solid #E7E7E7;border-radius:10px;padding:18px">
-          <p style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;font-weight:700;margin:0 0 8px">${t.project}</p>
-          <p style="font-size:18px;font-weight:700;margin:0;color:#1e293b">${esc(projectName)}</p>
-          <p style="font-size:12px;color:#64748b;margin:6px 0 0;font-weight:600">
-            <span style="display:inline-block;background:${adm.flagColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:10px;margin-right:6px">${adm.flag}</span>
-            ${adm.label} · ${adm.code}
-          </p>
+        <div style="background:#F9F9F9;border:1px solid #E7E7E7;border-radius:10px;padding:14px">
+          <p style="font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;font-weight:700;margin:0 0 6px">${t.project}</p>
+          <p style="font-size:14px;font-weight:700;margin:0;line-height:1.3;color:#1e293b">${esc(projectName)}</p>
+        </div>
+        <div style="background:#F9F9F9;border:1px solid #E7E7E7;border-radius:10px;padding:14px">
+          <p style="font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;font-weight:700;margin:0 0 6px">${t.venue}</p>
+          <p style="font-size:14px;font-weight:700;margin:0;line-height:1.3;color:#1e293b">${budget.venueName ? esc(budget.venueName) : '—'}</p>
+          ${budget.venueAddress ? `<p style="font-size:11px;color:#64748b;margin:3px 0 0">${esc(budget.venueAddress)}</p>` : ''}
         </div>
       </div>
 
-      <!-- Items table -->
+      <!-- [SECCIÓN: TABLA DE ITEMS]
+           <th> = encabezado (Descripción/Cant./P.Unitario/Total), font-size:10px.
+           <td> = celdas de cada fila: la descripción del ítem es font-size:12px
+           (line-height:1.35 controla el espacio entre renglones cuando la
+           descripción tiene varias líneas, por ejemplo con <br>), cantidad y
+           precio unitario son font-size:12px, y el total de la fila es
+           font-size:13px en negrita (para que resalte un poco más).
+           Los "width:45px / 95px / 105px" en Cant./P.Unitario/Total son el
+           ANCHO de esas columnas — si un precio no entra en una línea, se
+           puede agrandar ese width en vez de tocar el font-size (la columna
+           de Descripción se achica automáticamente para compensar).
+           padding:8px 12px = aire interno de cada celda (arriba/abajo 8px,
+           izquierda/derecha 12px). -->
       <table style="width:100%;border-collapse:collapse;margin-bottom:20px;border:1px solid #E7E7E7;border-radius:8px;overflow:hidden">
         <thead>
           <tr style="background:#F9F9F9">
-            ${showApprovalCol ? '<th style="text-align:center;padding:12px 8px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;font-weight:700;border-bottom:2px solid #E7E7E7;width:50px">✓</th>' : ''}
-            <th style="text-align:left;padding:12px 16px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;font-weight:700;border-bottom:2px solid #E7E7E7">${t.description}</th>
-            <th style="text-align:center;padding:12px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;font-weight:700;border-bottom:2px solid #E7E7E7;width:60px">${t.qty}</th>
-            <th style="text-align:right;padding:12px 16px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;font-weight:700;border-bottom:2px solid #E7E7E7;width:120px">${t.unitPrice}</th>
-            <th style="text-align:right;padding:12px 16px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;font-weight:700;border-bottom:2px solid #E7E7E7;width:130px">${t.total}</th>
+            <th style="text-align:left;padding:10px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;font-weight:700;border-bottom:2px solid #E7E7E7">${t.description}</th>
+            <th style="text-align:center;padding:10px 8px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;font-weight:700;border-bottom:2px solid #E7E7E7;width:45px">${t.qty}</th>
+            <th style="text-align:right;padding:10px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;font-weight:700;border-bottom:2px solid #E7E7E7;width:95px">${t.unitPrice}</th>
+            <th style="text-align:right;padding:10px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;font-weight:700;border-bottom:2px solid #E7E7E7;width:105px">${t.total}</th>
           </tr>
         </thead>
         <tbody>
           ${(budget.items||[]).map((it,i) => `
-            <tr style="background:${i%2?'#F9F9F9':'#fff'}">
-              ${showApprovalCol ? `<td style="text-align:center;padding:10px 8px;font-size:14px;border-bottom:1px solid #E7E7E7">${it.aprobado ? '✓' : ''}</td>` : ''}
-              <td style="padding:12px 16px;font-size:13px;border-bottom:1px solid #E7E7E7;color:#334155">${esc(it.description||'')}</td>
-              <td style="text-align:center;padding:12px 10px;font-size:13px;border-bottom:1px solid #E7E7E7;color:#334155;font-weight:600">${it.qty||0}</td>
-              <td style="text-align:right;padding:12px 16px;font-size:13px;border-bottom:1px solid #E7E7E7;color:#334155">${fmtCurrency(it.unitPrice||0, administration)}</td>
-              <td style="text-align:right;padding:12px 16px;font-size:14px;font-weight:700;border-bottom:1px solid #E7E7E7;color:#1e293b">${fmtCurrency((it.qty||0)*(it.unitPrice||0), administration)}</td>
+            <tr style="background:${i%2?'#EDEEF0':'#fff'};page-break-inside:avoid;break-inside:avoid">
+              <td style="padding:8px 12px;font-size:12px;line-height:1.35;border-bottom:1px solid #E7E7E7;color:#334155">${sanitizeItemDescriptionHtml(it.description||'')}</td>
+              <td style="text-align:center;padding:8px;font-size:12px;border-bottom:1px solid #E7E7E7;color:#334155;font-weight:600">${it.qty||0}</td>
+              <td style="text-align:right;padding:8px 12px;font-size:12px;border-bottom:1px solid #E7E7E7;color:#334155">${fmtCurrency(it.unitPrice||0, administration)}</td>
+              <td style="text-align:right;padding:8px 12px;font-size:13px;font-weight:700;border-bottom:1px solid #E7E7E7;color:#1e293b">${fmtCurrency((it.qty||0)*(it.unitPrice||0), administration)}</td>
             </tr>
           `).join('')}
         </tbody>
       </table>
 
-      <!-- Total -->
-      <div style="display:flex;justify-content:flex-end;margin-bottom:24px">
+      <!-- [SECCIÓN: TOTAL]
+           Subtotal/impuesto (cuando corresponde) van en font-size:13px, chico
+           y gris, para no competir con el total. El cuadro naranja de abajo
+           es el que más pesa visualmente: la etiqueta "TOTAL PRESUPUESTO" es
+           font-size:11px y el monto en sí es font-size:28px en blanco y
+           negrita — ese 28px es a propósito grande, es lo primero que el
+           cliente tiene que ver. El cuadro amarillo de "TOTAL APROBADO" (solo
+           aparece si el presupuesto está aprobado parcialmente) usa 20px. -->
+      <div style="display:flex;justify-content:flex-end;margin-bottom:24px;page-break-inside:avoid;break-inside:avoid">
         <div style="min-width:280px">
           ${pdfBreakdown.iva > 0 ? `
             <div style="display:flex;justify-content:space-between;gap:16px;padding:2px 4px;font-size:13px;color:#64748b">
@@ -3677,35 +4241,15 @@ window.buildBudgetHtmlFragment = function(budget) {
               <p style="color:#92400E;font-size:20px;font-weight:800;margin:0">${fmtCurrency(approvedTotal, administration)}</p>
             </div>
           ` : ''}
-          <div style="background:${adm.flagColor};border-radius:12px;padding:18px 24px;text-align:right">
+          <div style="background:#de591f;border-radius:12px;padding:18px 24px;text-align:right">
             <p style="color:rgba(255,255,255,.8);font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin:0 0 6px;font-weight:700">${t.totalBudget}</p>
             <p style="color:#fff;font-size:28px;font-weight:800;margin:0">${fmtCurrency(total, administration)}</p>
           </div>
         </div>
       </div>
 
-      ${administration === 'ARG' ? `
-        <!-- IVA manual checkbox area for Argentina -->
-        <div style="display:flex;justify-content:flex-end;margin-bottom:12px">
-          <div style="border:1px solid #E7E7E7;padding:10px 14px;border-radius:8px;background:#fff;width:260px;text-align:center">
-            <div style="font-size:12px;color:#64748b;font-weight:700;margin-bottom:6px">IVA</div>
-            <div style="display:flex;justify-content:space-around;align-items:center;font-size:13px;color:#374151">
-              <div style="display:flex;flex-direction:column;align-items:center">
-                <div style="font-weight:700">+IVA</div>
-                <div style="margin-top:6px">${budget.iva === 'con' ? '✓' : '&nbsp;'}</div>
-              </div>
-              <div style="display:flex;flex-direction:column;align-items:center">
-                <div style="font-weight:700">Sin IVA</div>
-                <div style="margin-top:6px">${budget.iva === 'sin' ? '✓' : '&nbsp;'}</div>
-              </div>
-            </div>
-            <div style="font-size:11px;color:#64748b;margin-top:6px">marcar +IVA / sin IVA</div>
-          </div>
-        </div>
-      ` : ''}
-
       ${administration === 'PERU' ? `
-        <!-- Mostrar + IGV debajo del total para Perú -->
+        <!-- [SECCIÓN: IGV PERÚ] — solo se muestra cuando administration === 'PERU' -->
         <div style="display:flex;justify-content:flex-end;margin-bottom:12px">
           <div style="border:1px solid #E7E7E7;padding:10px 14px;border-radius:8px;background:#fff;width:220px;text-align:center">
             <div style="font-size:12px;color:#64748b;font-weight:700;margin-bottom:6px">IGV</div>
@@ -3714,18 +4258,49 @@ window.buildBudgetHtmlFragment = function(budget) {
         </div>
       ` : ''}
 
-      <!-- Notes -->
-      ${budget.notes ? `
-        <div style="background:#F9F9F9;border:1px solid #E7E7E7;border-radius:10px;padding:18px;margin-bottom:24px">
-          <p style="font-size:11px;text-transform:uppercase;font-weight:700;color:#64748b;margin:0 0 10px;letter-spacing:.06em">${t.termsConditions}</p>
-          <p style="font-size:13px;color:#475569;white-space:pre-wrap;margin:0;line-height:1.6">${esc(budget.notes)}</p>
-        </div>
-      ` : ''}
+      <!-- [SECCIÓN: CONDICIONES GENERALES]
+           Orden de prioridad (el primero que exista es el que se usa):
+             1) Texto manual cargado en "Notas" del presupuesto (escapado, tal
+                cual lo escribió el usuario en ESE presupuesto puntual).
+             2) Texto propio guardado en Configuración → Condiciones para esta
+                administración (cfg.budgetTerms[administration]) — se edita
+                desde la app, sin tocar código (ver renderTermsSettings).
+             3) Texto por defecto de la app (DEFAULT_BUDGET_TERMS_TEXT) — buscar
+                "[SECCIÓN: TEXTO LEGAL]" más arriba en este archivo. -->
+      ${(() => {
+        const manualNotes = budget.notes ? `<p style="font-size:13px;color:#475569;white-space:pre-wrap;margin:0;line-height:1.6;page-break-inside:avoid;break-inside:avoid">${esc(budget.notes)}</p>` : '';
+        const customTermsText = (cfg.budgetTerms || {})[administration];
+        const customTermsHtml = customTermsText ? termsPlainTextToHtml(customTermsText) : '';
+        const defaultTermsHtml = DEFAULT_BUDGET_TERMS_TEXT[administration] ? termsPlainTextToHtml(DEFAULT_BUDGET_TERMS_TEXT[administration]) : (DEFAULT_BUDGET_TERMS[administration] || '');
+        const conditionsHtml = manualNotes || customTermsHtml || defaultTermsHtml;
+        if (!conditionsHtml) return '';
+        // page-break-inside:avoid (+ el equivalente moderno break-inside) le pide a html2pdf
+        // que, si este bloque no entra en lo que queda de la página actual, lo empuje entero
+        // a la página siguiente en vez de cortarlo por la mitad. Cada párrafo individual
+        // (ver _budgetTermsParagraph) tiene el mismo estilo, como respaldo por si el bloque
+        // completo es más alto que una página entera y de todos modos hay que partirlo.
+        return `
+        <div style="margin-bottom:24px;page-break-inside:avoid;break-inside:avoid">
+          <p style="font-size:14px;font-weight:700;color:#1e293b;margin:0 0 12px">${t.conditionsHeading}</p>
+          ${conditionsHtml}
+        </div>`;
+      })()}
 
+      <!-- [SECCIÓN: FOOTER]
+           Solo la URL del sitio web — pedido del cliente, sin nombre de empresa,
+           sin Tax ID, sin fecha de generación. Toma comp.website (el campo nuevo,
+           "Sitio web" en Configuración → Empresa); si todavía está vacío porque no se
+           migró el texto desde el campo "Ciudad / Localidad" (donde antes se guardaba
+           la URL como truco), usa comp.city como respaldo para que no quede en blanco. -->
+      ${(() => {
+        const websiteUrl = comp.website || comp.city || '';
+        if (!websiteUrl) return '';
+        return `
       <div style="text-align:center;font-size:11px;color:#cbd5e1;margin-top:40px;border-top:1px solid #E7E7E7;padding-top:20px">
-        <p style="margin:0">${esc(comp.name||'Aurea Technical Art')} ${comp.taxId ? `· ${esc(comp.taxId)}` : ''}</p>
-        <p style="margin:4px 0 0">${t.generatedOn} ${fmtDate(today())}</p>
+        <p style="margin:0">${esc(websiteUrl)}</p>
       </div>
+      `;
+      })()}
     </div>
   `;
 };
@@ -3739,7 +4314,7 @@ window.exportBudgetPDF = function(budgetId) {
   const el = document.createElement('div');
   el.innerHTML = html;
   document.body.appendChild(el);
-  
+
   const project = budget.projectId ? DB.get('projects', budget.projectId) : null;
   const administration = budget.administration || project?.administration || 'ARG';
   const isEnglish = administration === 'USA';
@@ -3755,31 +4330,47 @@ window.exportBudgetPDF = function(budgetId) {
     return;
   }
 
-  try {
-    html2pdf().set({
+  // Wait for fonts to be ready so html2canvas embeds the webfont in the canvas
+  Promise.resolve(typeof document.fonts !== 'undefined' ? document.fonts.ready : Promise.resolve()).then(() => {
+    return html2pdf().set({
       margin: 10,
       filename: fileName,
       image: { type: 'jpeg', quality: 0.98 },
-      html2canvas: { scale: 2, useCORS: true },
+      // scrollX/scrollY: 0 — evita un bug conocido de html2canvas: si la página de la app
+      // está scrolleada hacia abajo en el momento de exportar (por ejemplo, el usuario venía
+      // bajando por un presupuesto largo y ahí hizo clic en "Exportar PDF"), html2canvas puede
+      // capturar el contenido desplazado/mal alineado — el PDF sale con una página casi en
+      // blanco al principio y el total (u otro contenido) cortado, aunque en la vista previa
+      // se vea perfecto. Forzar scrollX/scrollY a 0 hace que la captura sea siempre la misma
+      // sin importar cuánto haya scrolleado el usuario.
+      html2canvas: { scale: 2, useCORS: true, scrollX: 0, scrollY: 0 },
       jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-    }).from(el).save().then(() => {
-      document.body.removeChild(el);
-      notify('PDF generado correctamente');
-    }).catch(err => {
-      document.body.removeChild(el);
-      console.error('Error generando PDF (budget):', err);
-      notify('Error generando PDF: ' + (err && err.message ? err.message : String(err)), 'error');
-    });
-  } catch (err) {
+      // 'css' hace que html2pdf respete los page-break-inside:avoid del HTML (Condiciones
+      // Generales, cada párrafo, la tabla de ítems, el total) para no cortarlos a la mitad
+      // entre dos páginas. 'legacy' es el resto del comportamiento de paginación por defecto.
+      pagebreak: { mode: ['css', 'legacy'] },
+    }).from(el).save();
+  }).then(() => {
     document.body.removeChild(el);
-    console.error('Error iniciando html2pdf (budget):', err);
+    notify('PDF generado correctamente');
+  }).catch(err => {
+    document.body.removeChild(el);
+    console.error('Error generando PDF (budget):', err);
     notify('Error generando PDF: ' + (err && err.message ? err.message : String(err)), 'error');
-  }
+  });
 };
 
 // ═══════════════════════════════════════════════════════════════
 // PDF — FACTURA / INVOICE
 // ═══════════════════════════════════════════════════════════════
+// OJO: esta es una función APARTE de buildBudgetHtmlFragment (la de los
+// presupuestos, más arriba) — tiene su propio HTML y sus propios font-size,
+// así que los tamaños de letra NO son los mismos ni comparten los mismos
+// números. Hoy por hoy solo se usa para la administración USA (ver
+// ADMIN.USA.invoice). Algunos tamaños de referencia acá abajo: 12-13px para
+// datos generales, celdas de la tabla y "Bill To"/"Project"; 16px para el
+// nombre del cliente/proyecto; 20px para el título Factura/Invoice; 24px
+// para el número de factura; 26px para el monto total en el cuadro naranja.
 function buildInvoiceHtmlFragment(invoiceId) {
   const inv = DB.get('invoices', invoiceId);
   if (!inv) return '';
@@ -3821,13 +4412,13 @@ function buildInvoiceHtmlFragment(invoiceId) {
   }
 
   return `
-    <div style="font-family:'Inter',Arial,sans-serif;max-width:720px;margin:0 auto;padding:40px;color:#1e293b">
+    <div style="font-family:'Aktiv Grotesk';max-width:720px;margin:0 auto;padding:40px;color:#1e293b">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid ${pdfBrandColor};padding-bottom:20px;margin-bottom:30px">
         <div style="flex:1">
           ${comp.logo ? `<img src="${comp.logo}" style="max-width:150px;max-height:80px;margin-bottom:12px;object-fit:contain" />` : ''}
           <h1 style="font-size:28px;font-weight:800;color:${pdfBrandColor};margin:0">${esc(comp.name||'Aurea Technical Art')}</h1>
           ${comp.tagline ? `<p style="color:#374151;font-size:13px;margin:6px 0;font-weight:600">${esc(comp.tagline)}</p>` : ''}
-          ${comp.address ? `<p style="color:#64748b;font-size:12px;margin-top:6px">${esc(comp.address)}</p>` : ''}
+          ${comp.address ? `<p style="color:#64748b;font-size:12px;margin:6px 0 2px">${esc(comp.address)}</p>` : ''}
           ${comp.address2 ? `<p style="color:#64748b;font-size:12px;margin:2px 0">${esc(comp.address2)}</p>` : ''}
           ${comp.city ? `<p style="color:#64748b;font-size:12px;margin:2px 0">${esc(comp.city)}</p>` : ''}
           ${comp.email ? `<p style="color:#64748b;font-size:12px;margin:2px 0">${esc(comp.email)}</p>` : ''}
@@ -3869,7 +4460,7 @@ function buildInvoiceHtmlFragment(invoiceId) {
         <tbody>
           ${(inv.items||[]).map((it,i) => `
             <tr style="background:${i%2?'#f8fafc':'#fff'}">
-              <td style="padding:10px 14px;font-size:13px;border-bottom:1px solid #f1f5f9">${esc(it.description||'')}</td>
+              <td style="padding:10px 14px;font-size:13px;border-bottom:1px solid #f1f5f9">${sanitizeItemDescriptionHtml(it.description||'')}</td>
               <td style="text-align:center;padding:10px;font-size:13px;border-bottom:1px solid #f1f5f9">${it.qty||0}</td>
               <td style="text-align:right;padding:10px 14px;font-size:13px;border-bottom:1px solid #f1f5f9">${fmtCurrency(it.unitPrice||0,project?.administration||'USA')}</td>
               <td style="text-align:right;padding:10px 14px;font-size:13px;font-weight:600;border-bottom:1px solid #f1f5f9">${fmtCurrency((it.qty||0)*(it.unitPrice||0),project?.administration||'USA')}</td>
@@ -3894,6 +4485,12 @@ function buildInvoiceHtmlFragment(invoiceId) {
   `;
 }
 
+const PDF_PREVIEW_FONT_STYLES = `<style>
+  @font-face { font-family:'Aktiv Grotesk'; src:url('/fonts/AktivGrotesk-Regular.woff2') format('woff2'); font-weight:400; font-style:normal; font-display:swap; }
+  @font-face { font-family:'Aktiv Grotesk'; src:url('/fonts/AktivGrotesk-Bold.woff2') format('woff2'); font-weight:700; font-style:normal; font-display:swap; }
+  body, button { font-family:'Aktiv Grotesk'; }
+</style>`;
+
 window.previewInvoicePDF = function(invoiceId) {
   const inv = DB.get('invoices', invoiceId);
   if (!inv) { notify('Factura no encontrada', 'error'); return; }
@@ -3911,7 +4508,7 @@ window.previewInvoicePDF = function(invoiceId) {
 
   const invRaw = inv.number ?? inv.invoiceNumber ?? '(sin número)';
   const displayNumber = formatBudgetRef(String(invRaw)) || '(sin número)';
-  const html = `<!doctype html><html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vista previa — ${esc(displayNumber)}</title></head><body><div style="margin-bottom:12px"><button onclick="(function(){ if(window.opener && typeof window.opener.exportInvoicePDF==='function'){ window.opener.exportInvoicePDF('${invoiceId}'); } else { alert('No se puede exportar desde aquí'); } })()" style="padding:8px 12px;margin-right:8px">Exportar PDF</button><button onclick="window.print()" style="padding:8px 12px">Imprimir</button></div>${fragment}</body></html>`;
+  const html = `<!doctype html><html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vista previa — ${esc(displayNumber)}</title>${PDF_PREVIEW_FONT_STYLES}</head><body><div style="margin-bottom:12px"><button onclick="(function(){ if(window.opener && typeof window.opener.exportInvoicePDF==='function'){ window.opener.exportInvoicePDF('${invoiceId}'); } else { alert('No se puede exportar desde aquí'); } })()" style="padding:8px 12px;margin-right:8px">Exportar PDF</button><button onclick="window.print()" style="padding:8px 12px">Imprimir</button></div>${fragment}</body></html>`;
 
   const w = window.open('', '_blank', 'width=900,height=800,scrollbars=yes');
   if (!w) { notify('El navegador bloqueó la ventana emergente. Permití popups para previsualizar.', 'warning'); return; }
@@ -3959,26 +4556,34 @@ window.exportInvoicePDF = function(invoiceId) {
     return;
   }
 
-  try {
-    html2pdf().set({
+  // Wait for fonts to be ready so html2canvas embeds the webfont in the canvas
+  Promise.resolve(typeof document.fonts !== 'undefined' ? document.fonts.ready : Promise.resolve()).then(() => {
+    return html2pdf().set({
       margin: 10,
       filename: fileName,
       image: { type: 'jpeg', quality: 0.98 },
-      html2canvas: { scale: 2, useCORS: true },
+      // scrollX/scrollY: 0 — evita un bug conocido de html2canvas: si la página de la app
+      // está scrolleada hacia abajo en el momento de exportar (por ejemplo, el usuario venía
+      // bajando por un presupuesto largo y ahí hizo clic en "Exportar PDF"), html2canvas puede
+      // capturar el contenido desplazado/mal alineado — el PDF sale con una página casi en
+      // blanco al principio y el total (u otro contenido) cortado, aunque en la vista previa
+      // se vea perfecto. Forzar scrollX/scrollY a 0 hace que la captura sea siempre la misma
+      // sin importar cuánto haya scrolleado el usuario.
+      html2canvas: { scale: 2, useCORS: true, scrollX: 0, scrollY: 0 },
       jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-    }).from(el).save().then(() => {
-      document.body.removeChild(el);
-      notify('PDF generado correctamente');
-    }).catch(err => {
-      document.body.removeChild(el);
-      console.error('Error generando PDF (invoice):', err);
-      notify('Error generando PDF: ' + (err && err.message ? err.message : String(err)), 'error');
-    });
-  } catch (err) {
+      // 'css' hace que html2pdf respete los page-break-inside:avoid del HTML (Condiciones
+      // Generales, cada párrafo, la tabla de ítems, el total) para no cortarlos a la mitad
+      // entre dos páginas. 'legacy' es el resto del comportamiento de paginación por defecto.
+      pagebreak: { mode: ['css', 'legacy'] },
+    }).from(el).save();
+  }).then(() => {
     document.body.removeChild(el);
-    console.error('Error iniciando html2pdf (invoice):', err);
+    notify('PDF generado correctamente');
+  }).catch(err => {
+    document.body.removeChild(el);
+    console.error('Error generando PDF (invoice):', err);
     notify('Error generando PDF: ' + (err && err.message ? err.message : String(err)), 'error');
-  }
+  });
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -4006,7 +4611,7 @@ window.previewBudgetPDF = function(budgetId) {
 
   const fragment = window.buildBudgetHtmlFragment(budget);
   const displayNumber = formatBudgetRef(budget.number ?? budget.budgetNumber ?? '(sin número)');
-  const html = `<!doctype html><html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vista previa — ${esc(displayNumber)}</title></head><body><div style="margin-bottom:12px"><button onclick="(function(){ if(window.opener && typeof window.opener.exportBudgetPDF==='function'){ window.opener.exportBudgetPDF('${budgetId}'); } else { alert('No se puede exportar desde aquí'); } })()" style="padding:8px 12px;margin-right:8px">Exportar PDF</button><button onclick="window.print()" style="padding:8px 12px">Imprimir</button></div>${fragment}</body></html>`;
+  const html = `<!doctype html><html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vista previa — ${esc(displayNumber)}</title>${PDF_PREVIEW_FONT_STYLES}</head><body><div style="margin-bottom:12px"><button onclick="(function(){ if(window.opener && typeof window.opener.exportBudgetPDF==='function'){ window.opener.exportBudgetPDF('${budgetId}'); } else { alert('No se puede exportar desde aquí'); } })()" style="padding:8px 12px;margin-right:8px">Exportar PDF</button><button onclick="window.print()" style="padding:8px 12px">Imprimir</button></div>${fragment}</body></html>`;
 
   const w = window.open('', '_blank', 'width=900,height=800,scrollbars=yes');
   if (!w) { notify('El navegador bloqueó la ventana emergente. Permití popups para previsualizar.', 'warning'); return; }

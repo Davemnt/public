@@ -1,5 +1,11 @@
 {
   "dependencies": {
     "firebase": "^12.17.1"
+  },
+  "devDependencies": {
+    "ttf2woff2": "^4.0.0"
+  },
+  "scripts": {
+    "fonts:build": "node scripts/convert-fonts.js"
   }
 }

@@ -17,8 +17,6 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="Aurea">
   <meta name="theme-color" content="#de591f">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <!-- Tailwind CSS & Libraries -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -65,13 +63,27 @@
       --c-text-light: #6b7280;
       --c-text-dark: #212020;
     }
-    
+    /* Fuentes locales: Aktiv Grotesk (colocadas en /fonts) */
+    @font-face {
+      font-family: 'Aktiv Grotesk';
+      src: url('fonts/AktivGrotesk-Regular.woff2') format('woff2');
+      font-weight: 400;
+      font-style: normal;
+      font-display: swap;
+    }
+    @font-face {
+      font-family: 'Aktiv Grotesk';
+      src: url('fonts/AktivGrotesk-Bold.woff2') format('woff2');
+      font-weight: 700;
+      font-style: normal;
+      font-display: swap;
+    }
     /* Ocultar app hasta que pase auth check */
     body.auth-loading #main-wrapper,
     body.auth-loading #sidebar {
       display: none !important;
     }
-    
+
     body.auth-loading {
       display: flex;
       align-items: center;
@@ -94,7 +106,8 @@
       to { transform: rotate(360deg); }
     }
     
-    body { font-family: 'Inter', -apple-system, sans-serif; }
+    /* Usar la fuente local por defecto con fallbacks */
+    html, body, button, input, select, textarea { font-family: 'Aktiv Grotesk'; }
 
     /* Scrollbar */
     ::-webkit-scrollbar { width: 5px; height: 5px; }
@@ -309,7 +322,7 @@
     }
 
     /* Swal custom */
-    .swal2-popup { font-family: 'Inter', sans-serif !important; border-radius: 16px !important; }
+    .swal2-popup { font-family: 'Aktiv Grotesk' !important; border-radius: 16px !important; }
     .swal2-title { font-size: 18px !important; }
     .swal2-confirm { background: var(--c-brand) !important; border-radius: 9px !important; }
     .swal2-cancel { border-radius: 9px !important; }
@@ -526,7 +539,6 @@
   <!-- Database & App -->
   <script src="./db-firebase.js"></script>
   <script src="./app.js"></script>
-  <script src="./datos-ejemplo.js"></script>
   
   <!-- Mobile bottom nav -->
   <nav class="mobile-bottom-nav" role="navigation" aria-label="Navegación móvil">

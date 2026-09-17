@@ -160,7 +160,7 @@ const DB = (() => {
     expenses: [],
     operations: [],
     invoices: [],
-    config: null
+    config: undefined
   };
   
   // Listeners activos
@@ -257,7 +257,7 @@ const DB = (() => {
     
     listeners['config'] = configRef.onSnapshot(
       (doc) => {
-        cache.config = doc.exists ? doc.data() : null;
+        cache.config = doc.exists ? doc.data() : {};
         window.dispatchEvent(new CustomEvent('db-updated', { 
           detail: { collection: 'config', data: cache.config } 
         }));
@@ -279,6 +279,20 @@ const DB = (() => {
       console.error(`Error cargando ${col} desde Firestore:`, error);
       cache[col] = [];
       return [];
+    }
+  }
+
+  async function _hydrateConfig() {
+    try {
+      const userId = _getUserId();
+      const configRef = db.collection('users').doc(userId).collection('config').doc('company');
+      const doc = await configRef.get();
+      cache.config = doc.exists ? doc.data() : {};
+      return cache.config;
+    } catch (error) {
+      console.error('Error cargando config desde Firestore:', error);
+      cache.config = {};
+      return cache.config;
     }
   }
   
@@ -887,7 +901,7 @@ const DB = (() => {
       for (const col of collections) {
         await _hydrateCollection(col);
       }
-      await _hydrateCollection('config');
+      await _hydrateConfig();
 
       // Iniciar listeners para todas las colecciones
       _startListener('budgets');
@@ -925,7 +939,7 @@ const DB = (() => {
     cache.expenses = [];
     cache.operations = [];
     cache.invoices = [];
-    cache.config = null;
+    cache.config = undefined;
     
     console.log('✅ DB listeners detenidos');
   }
