@@ -9,6 +9,19 @@ La app ya quedó publicada en Hosting, pero para que funcione correctamente con 
 
 ---
 
+## Facturacion USA: facturas y versiones
+
+- En un proyecto United States, **Facturacion > Nueva Factura** permite crear varias facturas independientes.
+- **Ver / Editar > Guardar** conserva una copia de la version anterior (cliente, items, precios, total, estado, fechas y notas). Guardar sin cambios no crea otra version.
+- **Invoice Date** es editable en facturas nuevas y existentes. Cada factura nueva o modificacion recibe un numero propio `AAMMDD-NNN`, con la fecha elegida y un contador diario compartido con presupuestos. Varias facturas de la misma fecha tienen correlativos diferentes. Se evitan tambien los numeros existentes en presupuestos, facturas antiguas y versiones historicas. No se reutiliza el numero del presupuesto. La fecha real de guardado se conserva por separado en el historial.
+- Las versiones se consultan en la propia factura y en **Historial** del proyecto; cada una tiene vista previa y PDF con sus datos y numero originales.
+- El monto del proyecto es la suma de las facturas vigentes, sin sumar las versiones anteriores. Para estos proyectos USA, la ganancia prevista se calcula con ese monto menos los gastos. Esto no registra cobros ni modifica los ingresos o el presupuesto original; las otras administraciones conservan su calculo habitual.
+- Una vez sincronizado desde facturas, editar el presupuesto no reemplaza ese monto. Eliminar una factura tambien elimina sus versiones y descuenta su total, previa confirmacion.
+- En Firebase, la factura y el monto del proyecto se guardan juntos en una transaccion. Una edicion concurrente se rechaza para evitar sobrescribir otra version; hay que volver a abrir la factura.
+- Las facturas anteriores a esta funcionalidad comienzan como version 1. Su primera modificacion conserva la informacion existente; no se pueden reconstruir cambios que nunca se guardaron.
+
+Pruebas de regresion: `node --test scripts/invoice.test.js` (adaptador local, modo demo de Firebase y transacciones Firebase simuladas, sin acceder a datos reales).
+
 ## 1) Requisitos previos
 
 Necesitás tener:

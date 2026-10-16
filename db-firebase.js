@@ -128,17 +128,34 @@ const DB = (() => {
     return next;
   }
   
-  function nextBudgetNumberDemo() {
+  function invoiceNumberDate(date) {
+    const now = date === undefined ? new Date() : new Date(`${date}T12:00:00`);
+    if (date !== undefined && (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(now.getTime()) ||
+      `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}` !== date)) {
+      throw new Error('Seleccioná una fecha de factura válida.');
+    }
+    return now;
+  }
+
+  function lastUsedInvoiceNumber(records, dateKey) {
+    return records.reduce((max, record) => {
+      const number = String(record.number ?? record.invoiceNumber ?? record.budgetNumber ?? '').replace('-', '');
+      return number.startsWith(dateKey) && /^\d{9,}$/.test(number) ? Math.max(max, Number(number.slice(6))) : max;
+    }, 0);
+  }
+
+  function nextBudgetNumberDemo(date) {
     const counters = localStorage.getItem('aurea2_budget_counters');
     const data = counters ? JSON.parse(counters) : {};
     
-    const now = new Date();
+    const now = invoiceNumberDate(date);
     const yy = String(now.getFullYear()).slice(-2);
     const mm = String(now.getMonth() + 1).padStart(2, '0');
     const dd = String(now.getDate()).padStart(2, '0');
     const dateKey = `${yy}${mm}${dd}`;
     
-    const current = data[dateKey] || 0;
+    const records = date === undefined ? [] : [...getAllDemo('budgets'), ...getAllDemo('invoices').flatMap(inv => [inv, ...(inv.history || [])])];
+    const current = Math.max(data[dateKey] || 0, lastUsedInvoiceNumber(records, dateKey));
     const next = current + 1;
     data[dateKey] = next;
     
@@ -160,7 +177,7 @@ const DB = (() => {
     expenses: [],
     operations: [],
     invoices: [],
-    config: undefined
+    config: null
   };
   
   // Listeners activos
@@ -257,7 +274,7 @@ const DB = (() => {
     
     listeners['config'] = configRef.onSnapshot(
       (doc) => {
-        cache.config = doc.exists ? doc.data() : {};
+        cache.config = doc.exists ? doc.data() : null;
         window.dispatchEvent(new CustomEvent('db-updated', { 
           detail: { collection: 'config', data: cache.config } 
         }));
@@ -279,20 +296,6 @@ const DB = (() => {
       console.error(`Error cargando ${col} desde Firestore:`, error);
       cache[col] = [];
       return [];
-    }
-  }
-
-  async function _hydrateConfig() {
-    try {
-      const userId = _getUserId();
-      const configRef = db.collection('users').doc(userId).collection('config').doc('company');
-      const doc = await configRef.get();
-      cache.config = doc.exists ? doc.data() : {};
-      return cache.config;
-    } catch (error) {
-      console.error('Error cargando config desde Firestore:', error);
-      cache.config = {};
-      return cache.config;
     }
   }
   
@@ -404,13 +407,102 @@ const DB = (() => {
     if (window.isDemoMode) {
       return removeDemo(col, id);
     }
-    
-    // MODO PRODUCCIÓN: Usar Firestore
     try {
       const collectionRef = _getCollection(col);
       await collectionRef.doc(id).delete();
     } catch (error) {
       console.error(`Error eliminando ${col}/${id}:`, error);
+      throw error;
+    }
+  }
+
+  async function saveProjectInvoice(projectId, invoiceId, data, expectedVersion) {
+    if (window.isDemoMode) {
+      const project = getDemo('projects', projectId);
+      if (!project || project.administration !== 'USA') throw new Error('Proyecto USA no encontrado.');
+      const invoices = getAllDemo('invoices').filter(inv => inv.projectId === projectId);
+      const current = invoiceId ? invoices.find(inv => inv.id === invoiceId) : null;
+      if (invoiceId && (!current || (current.version || 1) !== expectedVersion)) {
+        throw new Error('La factura cambió o fue eliminada. Volvé a abrirla antes de guardar.');
+      }
+      if (!invoiceId && data.budgetId) {
+        const existing = invoices.find(inv => inv.budgetId === data.budgetId);
+        if (existing) return existing;
+      }
+      const invoice = data ? { ...current, ...data, projectId, id: invoiceId || _id() } : null;
+      const totals = Object.fromEntries(invoices.map(inv => [inv.id, inv.total ?? (inv.items || []).reduce((sum, it) => sum + Number(it.qty || 0) * Number(it.unitPrice || 0), 0)]));
+      const previousInvoices = getAllDemo('invoices');
+      const previousProjects = getAllDemo('projects');
+      try {
+        if (invoice) {
+          if (invoiceId) updateDemo('invoices', invoiceId, invoice);
+          else {
+            _setLocalStorage('invoices', [...previousInvoices, invoice]);
+          }
+          totals[invoice.id] = invoice.total;
+        } else {
+          removeDemo('invoices', invoiceId);
+          delete totals[invoiceId];
+        }
+        updateDemo('projects', projectId, { invoiceTotals: totals, budgetAmount: Number(Object.values(totals).reduce((sum, total) => sum + total, 0).toFixed(2)) });
+        return invoice;
+      } catch (error) {
+        _setLocalStorage('invoices', previousInvoices);
+        _setLocalStorage('projects', previousProjects);
+        throw error;
+      }
+    }
+
+    try {
+      const invoicesRef = _getCollection('invoices');
+      const invoiceRef = invoiceId ? invoicesRef.doc(invoiceId) : invoicesRef.doc();
+      const projectRef = _getCollection('projects').doc(projectId);
+      // Seed legacy projects; subsequent transactions use the persisted map.
+      const existingInvoices = await invoicesRef.where('projectId', '==', projectId).get();
+      const initialTotals = {};
+      const initialBudgetIds = {};
+      existingInvoices.forEach(doc => {
+        const inv = doc.data();
+        initialTotals[doc.id] = inv.total ?? (inv.items || []).reduce((sum, it) => sum + Number(it.qty || 0) * Number(it.unitPrice || 0), 0);
+        if (inv.budgetId) initialBudgetIds[inv.budgetId] = doc.id;
+      });
+      return await db.runTransaction(async transaction => {
+        const projectDoc = await transaction.get(projectRef);
+        const invoiceDoc = invoiceId ? await transaction.get(invoiceRef) : null;
+        const project = projectDoc.exists ? projectDoc.data() : null;
+        if (!project || project.administration !== 'USA') throw new Error('Proyecto USA no encontrado.');
+        const current = invoiceDoc?.exists ? invoiceDoc.data() : null;
+        if (invoiceId && (!current || current.projectId !== projectId || (current.version || 1) !== expectedVersion)) {
+          throw new Error('La factura cambió o fue eliminada. Volvé a abrirla antes de guardar.');
+        }
+        const budgetIds = { ...(project.budgetInvoiceIds || initialBudgetIds) };
+        if (!invoiceId && data.budgetId && budgetIds[data.budgetId]) {
+          const existing = await transaction.get(invoicesRef.doc(budgetIds[data.budgetId]));
+          if (existing.exists) return { ...existing.data(), id: existing.id };
+        }
+        const totals = { ...(project.invoiceTotals || initialTotals) };
+        const invoice = data ? { ...data, projectId, id: invoiceRef.id } : null;
+        if (invoice) {
+          totals[invoiceRef.id] = invoice.total;
+          if (invoice.budgetId) budgetIds[invoice.budgetId] = invoiceRef.id;
+          const payload = sanitizeForFirestore(invoice);
+          payload.updatedAt = firebase.firestore.FieldValue.serverTimestamp();
+          transaction.set(invoiceRef, payload, { merge: true });
+        } else {
+          delete totals[invoiceId];
+          if (current.budgetId) delete budgetIds[current.budgetId];
+          transaction.delete(invoiceRef);
+        }
+        transaction.update(projectRef, {
+          invoiceTotals: totals,
+          budgetInvoiceIds: budgetIds,
+          budgetAmount: Number(Object.values(totals).reduce((sum, total) => sum + total, 0).toFixed(2)),
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        return invoice;
+      });
+    } catch (error) {
+      console.error('Error guardando factura y monto del proyecto:', error);
       throw error;
     }
   }
@@ -503,11 +595,12 @@ const DB = (() => {
    * EJEMPLO:
    * const budgetNumber = await DB.nextBudgetNumber();
    * console.log(budgetNumber); // "26080400001"
+   * Fecha opcional YYYY-MM-DD: reserva el correlativo de ese dia.
    */
-  async function nextBudgetNumber() {
+  async function nextBudgetNumber(date) {
     // MODO DEMO: Usar contador en localStorage
     if (window.isDemoMode) {
-      return nextBudgetNumberDemo();
+      return nextBudgetNumberDemo(date);
     }
     
     // MODO PRODUCCIÓN: Usar transacción en Firestore
@@ -515,16 +608,26 @@ const DB = (() => {
       const userId = _getUserId();
       const counterRef = db.collection('users').doc(userId).collection('counters').doc('budgets');
       
-      const now = new Date();
+      const now = invoiceNumberDate(date);
       const yy = String(now.getFullYear()).slice(-2);
       const mm = String(now.getMonth() + 1).padStart(2, '0');
       const dd = String(now.getDate()).padStart(2, '0');
       const dateKey = `${yy}${mm}${dd}`;
+      const records = [];
+      if (date !== undefined) {
+        const [budgets, invoices] = await Promise.all([_getCollection('budgets').get(), _getCollection('invoices').get()]);
+        budgets.forEach(doc => records.push(doc.data()));
+        invoices.forEach(doc => {
+          const invoice = doc.data();
+          records.push(invoice, ...(invoice.history || []));
+        });
+      }
+      const lastUsed = lastUsedInvoiceNumber(records, dateKey);
       
       const dailyCounter = await db.runTransaction(async (transaction) => {
         const doc = await transaction.get(counterRef);
         const data = doc.exists ? doc.data() : {};
-        const currentCounter = data[dateKey] || 0;
+        const currentCounter = Math.max(data[dateKey] || 0, lastUsed);
         const nextCounter = currentCounter + 1;
         
         transaction.set(counterRef, { [dateKey]: nextCounter }, { merge: true });
@@ -625,8 +728,12 @@ const DB = (() => {
    * para normalizar un proyecto a dólares.
    *
    * Orden de prioridad:
-   * 1. project.exchangeRateToUSD (cargado a mano en el proyecto)
-   * 2. exchangeRateToUSD del presupuesto activo/aprobado (cargado en el presupuesto)
+   * 1. project.exchangeRateToUSD (única fuente editable desde la app — se carga en la
+   *    pantalla del Proyecto, abajo de todo).
+   * 2. exchangeRateToUSD del presupuesto activo/aprobado — SOLO como respaldo, por
+   *    compatibilidad con presupuestos viejos que todavía tengan un valor guardado de
+   *    antes de que el campo se sacara del formulario de Presupuestos. Ya no se puede
+   *    cargar/editar desde ahí.
    * 3. USA → 1 (ya está en USD)
    * 4. Sin dato → 0 (no se puede normalizar; se excluye de los totales en USD)
    *
@@ -659,10 +766,21 @@ const DB = (() => {
    */
   function getProjectFinancials(projectId) {
     const budget = getActiveBudget(projectId);
-    const budgetTotal = getApprovedBudgetTotal(budget);
+    const project = get('projects', projectId) || {};
+    // budgetTotal ("Presupuesto Aprobado"): se lee del PROYECTO (project.budgetAmount),
+    // que queda congelado con el monto correcto (misma fórmula, mismo IVA/IGV) apenas se
+    // aprueba un presupuesto — ver saveBudgetForm/approveBudget/createInvoiceFromBudget en
+    // app.js. Antes esto se recalculaba ACÁ leyendo los items del presupuesto de nuevo
+    // (getApprovedBudgetTotal), lo que generaba números distintos entre Proyectos,
+    // Administración/Inicio y la pestaña Finanzas ("está tomando el IVA como parte del
+    // total" que reportó el cliente). Si el proyecto todavía no tiene ese campo guardado
+    // (proyectos viejos, o sin presupuesto vinculado), usamos el cálculo anterior como
+    // respaldo.
+    const budgetTotal = (project.budgetAmount !== undefined && project.budgetAmount !== null)
+      ? (Number(project.budgetAmount) || 0)
+      : getApprovedBudgetTotal(budget);
 
     const incomes = getIncomesByProject(projectId);
-    const project = get('projects', projectId) || {};
     const totalIncomeGross = incomes.reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
 
     // FIX: antes se le quitaba el IVA/IGV a TODOS los ingresos del proyecto usando una única
@@ -695,14 +813,29 @@ const DB = (() => {
     const totalExpense = expenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
     const totalSpent = totalExpense; // Alias para compatibilidad
 
-    const profit = totalIncome - totalExpense;
-    const remaining = budgetTotal - totalSpent;
+    // La ganancia es el número que se muestra y suma en Proyectos, Inicio y
+    // Administraciones. Se redondea una sola vez para que los totales coincidan con las filas.
+    const profit = Math.round((project.administration === 'USA' && project.invoiceTotals ? budgetTotal : totalIncome) - totalExpense);
+    // Redondeamos "remaining" a un número entero de moneda local ACÁ, en el único lugar
+    // donde se calcula. Así, la lista de Proyectos (que muestra cada fin.remaining por
+    // fila) y Administraciones/Inicio (que SUMAN fin.remaining de todos los proyectos y
+    // después redondean el total) parten siempre del mismo número entero, y la suma de
+    // las filas coincide exacto con el total mostrado arriba. Sin este redondeo acá, el
+    // presupuesto podía traer decimales (por el cálculo de IVA/IGV) y aparecía una
+    // diferencia de $1 entre la lista y el total (suma de redondeados ≠ redondeo de la suma).
+    const remaining = Math.round(budgetTotal - totalSpent);
     const percentUsed = budgetTotal > 0 ? (totalSpent / budgetTotal) * 100 : 0;
 
     // Conversión a USD (moneda local por 1 USD). USA = 1 por defecto.
     const rate = _effectiveExchangeRate(project, budget);
     const profitUSD = rate > 0 ? (profit / rate) : 0;
     const budgetTotalUSD = rate > 0 ? (budgetTotal / rate) : 0;
+    // remainingUSD: el "saldo" del proyecto (Presupuesto aprobado − Gastos) convertido a
+    // dólares. Es lo que se usa para los gráficos (Inicio y Administraciones) — ver
+    // getDashboardStats más abajo — porque representa un proyecto ya confirmado (con
+    // presupuesto aprobado), a diferencia de profit/profitUSD que depende de los Ingresos
+    // cargados a mano y puede no reflejar todavía el total presupuestado.
+    const remainingUSD = rate > 0 ? (remaining / rate) : 0;
 
     return {
       budgetTotal,
@@ -715,7 +848,8 @@ const DB = (() => {
       percentUsed: Math.round(percentUsed),
       exchangeRateToUSD: rate,
       profitUSD,
-      budgetTotalUSD
+      budgetTotalUSD,
+      remainingUSD
     };
   }
   
@@ -737,9 +871,25 @@ const DB = (() => {
    * - earningsUSA: Ganancias en dólares estadounidenses
    * - totalEarnings: Suma total de todas las ganancias
    */
-  function getDashboardStats() {
-    const projects = getAll('projects');
-    const budgets = getAll('budgets');
+  function _recordYear(record) {
+    const raw = record && (record.date || record.createdAt || record.created || record.created_at || record.startDate || record.start_date);
+    if (!raw) return 0;
+    if (typeof raw === 'object' && typeof raw.toDate === 'function') return raw.toDate().getFullYear();
+    if (typeof raw === 'object' && typeof raw.seconds === 'number') return new Date(raw.seconds * 1000).getFullYear();
+    if (typeof raw === 'string') {
+      const isoYear = raw.match(/^(\d{4})-/);
+      if (isoYear) return Number(isoYear[1]);
+      const localYear = raw.match(/^\d{1,2}\/\d{1,2}\/(\d{4})$/);
+      if (localYear) return Number(localYear[1]);
+    }
+    const date = new Date(raw);
+    return isNaN(date.getTime()) ? 0 : date.getFullYear();
+  }
+
+  function getDashboardStats(year = new Date().getFullYear()) {
+    const selectedYear = Number(year) || new Date().getFullYear();
+    const projects = getAll('projects').filter(project => _recordYear(project) === selectedYear);
+    const budgets = getAll('budgets').filter(budget => _recordYear(budget) === selectedYear);
 
     // Proyectos activos — aceptar variantes de estado ('activo' o 'aprobado')
     const activeProjects = projects.filter(p => ['activo','aprobado'].includes(p.status)).length;
@@ -750,9 +900,11 @@ const DB = (() => {
     // Presupuestos cancelados
     const cancelledBudgets = budgets.filter(b => b.status === 'rechazado').length;
 
-    // Ganancias por administración = suma de profit real de cada proyecto (mismo cálculo que la lista de proyectos)
+    // Ganancias por administración = suma de la ganancia neta de cada proyecto
+    // (Ingresos sin IVA/IGV - Gastos). Los valores negativos se restan del total.
     const earnings = { ARG: 0, PERU: 0, USA: 0 };
-    // Equivalente en USD por administración, usando el tipo de cambio cargado en cada proyecto/presupuesto.
+    // Equivalente en USD por administración, usando el tipo de cambio cargado en cada
+    // proyecto (campo exchangeRateToUSD del proyecto — ver _effectiveExchangeRate).
     // Esto es lo que permite comparar ARG/PERU/USA en los gráficos aunque manejen montos muy distintos.
     const earningsUSDByAdmin = { ARG: 0, PERU: 0, USA: 0 };
     let earningsUSD = 0;
@@ -760,12 +912,12 @@ const DB = (() => {
       try {
         const fin = getProjectFinancials(p.id);
         const adm = String(p.administration || '').toUpperCase();
-        const profit = Number(fin.profit || 0) || 0;
-        const profitUSD = Number(fin.profitUSD || 0) || 0;
-        if (adm === 'ARG') { earnings.ARG += profit; earningsUSDByAdmin.ARG += profitUSD; }
-        else if (adm === 'PERU') { earnings.PERU += profit; earningsUSDByAdmin.PERU += profitUSD; }
-        else if (adm === 'USA') { earnings.USA += profit; earningsUSDByAdmin.USA += profitUSD; }
-        earningsUSD += profitUSD;
+        const projectProfit = Number(fin.profit || 0) || 0;
+        const projectProfitUSD = Number(fin.profitUSD || 0) || 0;
+        if (adm === 'ARG') { earnings.ARG += projectProfit; earningsUSDByAdmin.ARG += projectProfitUSD; }
+        else if (adm === 'PERU') { earnings.PERU += projectProfit; earningsUSDByAdmin.PERU += projectProfitUSD; }
+        else if (adm === 'USA') { earnings.USA += projectProfit; earningsUSDByAdmin.USA += projectProfitUSD; }
+        earningsUSD += projectProfitUSD;
       } catch (e) { /* ignore */ }
     });
 
@@ -801,56 +953,42 @@ const DB = (() => {
   }
   
   /**
-   * getMonthlyData - Genera datos de ganancias mensuales para el gráfico de Inicio
-   * Retorna los últimos 12 meses, con el neto (ingresos - gastos) de cada administración
-   * normalizado a USD usando el tipo de cambio cargado en cada proyecto/presupuesto
-   * (ver _effectiveExchangeRate). Así ARG (montos en millones) y PERU/USA (montos chicos)
-   * quedan en la misma escala y son comparables en el mismo gráfico.
+  * getMonthlyData - Genera datos de ganancias mensuales para el gráfico de Inicio.
+  * Cada proyecto aporta su ganancia neta (Ingresos sin IVA/IGV - Gastos), normalizada
+  * a USD con el tipo de cambio cargado en ese proyecto.
    *
    * IMPORTANTE: un proyecto sin tipo de cambio cargado (ARG/PERU) no puede normalizarse
    * y queda afuera de este cálculo hasta que se le cargue el valor del dólar.
    */
-  function getMonthlyData() {
-    const now = new Date();
+  function getMonthlyData(year = new Date().getFullYear()) {
+    const selectedYear = Number(year) || new Date().getFullYear();
     const monthlyData = [];
-    for (let i = 11; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    for (let monthIndex = 0; monthIndex < 12; monthIndex++) {
+      const d = new Date(selectedYear, monthIndex, 1);
       monthlyData.push({
         key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
-        label: d.toLocaleDateString('es-ES', { month: 'short', year: 'numeric' }),
+        label: d.toLocaleDateString('es-ES', { month: 'short' }),
         earningsARG: 0,
         earningsPERU: 0,
         earningsUSA: 0
       });
     }
 
-    const projects = getAll('projects');
-    const projectById = {};
-    projects.forEach(p => { projectById[p.id] = p; });
-
-    const budgetByProjectId = {};
-    getAll('budgets').forEach(b => {
-      if (!b.projectId) return;
-      if (['aprobado-total', 'aprobado-parcial'].includes(b.status)) budgetByProjectId[b.projectId] = b;
-    });
-
-    const applyToMonth = (projectId, dateStr, amount, sign) => {
-      const project = projectById[projectId];
-      if (!project) return;
-      const key = String(dateStr || '').slice(0, 7);
+    const projects = getAll('projects').filter(project => _recordYear(project) === selectedYear);
+    projects.forEach(project => {
+      const rawDate = project.date || project.createdAt || project.created;
+      const date = rawDate && typeof rawDate.toDate === 'function' ? rawDate.toDate() : rawDate;
+      const key = date instanceof Date
+        ? `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+        : String(date || '').slice(0, 7);
       const month = monthlyData.find(m => m.key === key);
       if (!month) return;
-      const rate = _effectiveExchangeRate(project, budgetByProjectId[projectId]);
-      if (!(rate > 0)) return; // sin tipo de cambio cargado: no se puede normalizar todavía
-      const usd = ((Number(amount) || 0) / rate) * sign;
+      const usd = Number(getProjectFinancials(project.id).profitUSD || 0) || 0;
       const adm = String(project.administration || '').toUpperCase();
       if (adm === 'ARG') month.earningsARG += usd;
       else if (adm === 'PERU') month.earningsPERU += usd;
       else if (adm === 'USA') month.earningsUSA += usd;
-    };
-
-    getAll('incomes').forEach(inc => applyToMonth(inc.projectId, inc.date, inc.amount, 1));
-    getAll('expenses').forEach(exp => applyToMonth(exp.projectId, exp.date, exp.amount, -1));
+    });
 
     return monthlyData.map(m => ({
       label: m.label,
@@ -901,7 +1039,7 @@ const DB = (() => {
       for (const col of collections) {
         await _hydrateCollection(col);
       }
-      await _hydrateConfig();
+      await _hydrateCollection('config');
 
       // Iniciar listeners para todas las colecciones
       _startListener('budgets');
@@ -939,7 +1077,7 @@ const DB = (() => {
     cache.expenses = [];
     cache.operations = [];
     cache.invoices = [];
-    cache.config = undefined;
+    cache.config = null;
     
     console.log('✅ DB listeners detenidos');
   }
@@ -955,6 +1093,7 @@ const DB = (() => {
     add,
     update,
     remove,
+    saveProjectInvoice,
     
     // Configuración
     getConfig,

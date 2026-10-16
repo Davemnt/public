@@ -106,7 +106,7 @@ const INVOICE_STATUS = {
  * @returns {string} Monto formateado (ej: "$1,234.56" o "S/1,234.56")
  */
 function fmtCurrency(amount, adm) {
-  const n = Math.floor(Number(amount) || 0); // no decimals
+  const n = Math.round(Number(amount) || 0); // no decimals
   // Resolve admin config by key or by currency code
   let a = ADMIN[adm] || Object.values(ADMIN).find(x => x.code === adm) || ADMIN.ARG;
   // For Spanish administrations (ARG, PERU) force thousands separator as dot
@@ -115,13 +115,11 @@ function fmtCurrency(amount, adm) {
     const withDots = int.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
     const sign = n < 0 ? '-' : '';
     const out = a.code === 'PEN' ? `S./ ${sign}${withDots}` : `$ ${sign}${withDots}`;
-    if (n < 0) return `<span class="text-red-600">${out}</span>`;
     return out;
   }
   // Default: use locale formatting (USD)
   const formatted = n.toLocaleString(a.locale || 'en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
   const out = a.code === 'USD' ? `USD ${formatted}` : `${a.symbol || '$'} ${formatted}`;
-  if (n < 0) return `<span class="text-red-600">${out}</span>`;
   return out;
 }
 
@@ -159,6 +157,41 @@ function parseToMs(v) {
   return 0;
 }
 
+let _reportingYear = new Date().getFullYear();
+
+function recordYear(record) {
+  const raw = record && (record.date || record.createdAt || record.created || record.created_at || record.startDate || record.start_date);
+  const timestamp = parseToMs(raw);
+  return timestamp ? new Date(timestamp).getFullYear() : 0;
+}
+
+function getReportingYears() {
+  const years = new Set([new Date().getFullYear()]);
+  ['projects', 'budgets', 'invoices'].forEach(collection => {
+    (DB.getAll(collection) || []).forEach(record => {
+      const year = recordYear(record);
+      if (year) years.add(year);
+    });
+  });
+  return [...years].sort((a, b) => b - a);
+}
+
+function reportingYearSelect() {
+  return `<select class="form-select" style="width:100%;background:#fff" aria-label="Año de consulta" onchange="setReportingYear(this.value)">
+    ${getReportingYears().map(year => `<option value="${year}" ${year === _reportingYear ? 'selected' : ''}>${year}</option>`).join('')}
+  </select>`;
+}
+
+function renderReportingYearMenu() {
+  const container = document.getElementById('reporting-year-menu');
+  if (container) container.innerHTML = reportingYearSelect();
+}
+
+window.setReportingYear = function(year) {
+  _reportingYear = Number(year) || new Date().getFullYear();
+  route(window.location.hash || '#/');
+};
+
 function canGenerateInvoicesForProject(projectOrAdministration) {
   const admin = typeof projectOrAdministration === 'string'
     ? projectOrAdministration
@@ -172,7 +205,7 @@ function formatBudgetRef(num) {
   let s = String(num);
   if (s === '(nuevo)') return s;
   if (s.includes('-')) return s;
-  const m = s.match(/^(\d{6})(\d{3})$/);
+  const m = s.match(/^(\d{6})(\d{3,})$/);
   if (m) return `${m[1]}-${m[2]}`;
   return s;
 }
@@ -269,6 +302,66 @@ function handleDescPaste(e) {
   e.target.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
+function placeCaretAtEnd(el) {
+  if (!el) return;
+  el.focus();
+  const selection = window.getSelection();
+  if (!selection) return;
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+window.invDescKeyDown = function(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    window.addInvRow();
+  }
+};
+
+let _formatSelection = null;
+
+window.rememberFormatSelection = function(editor) {
+  const selection = window.getSelection();
+  if (!editor || !selection || !selection.rangeCount) return;
+  const range = selection.getRangeAt(0);
+  if (!editor.contains(range.commonAncestorContainer)) return;
+  _formatSelection = { editor, range: range.cloneRange() };
+};
+
+window.execFormat = function(command, value) {
+  try {
+    const saved = _formatSelection;
+    if (!saved?.editor?.isConnected) return;
+
+    saved.editor.focus();
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(saved.range);
+    document.execCommand(command, false, value || null);
+    window.rememberFormatSelection(saved.editor);
+
+    const row = saved.editor.closest('tr');
+    const index = Number((row?.id || '').match(/-(\d+)$/)?.[1]);
+    if (!Number.isInteger(index)) return;
+    if (row.id.startsWith('inv-li-row-') && typeof window.updateInvRow === 'function') window.updateInvRow(index);
+    else if (row.id.startsWith('li-row-') && typeof window.updateLiRow === 'function') window.updateLiRow(index);
+  } catch (error) {
+    console.warn('Format error', error);
+  }
+};
+
+document.addEventListener('selectionchange', () => {
+  const selection = window.getSelection();
+  if (!selection?.rangeCount) return;
+  const node = selection.anchorNode;
+  const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+  const editor = element?.closest?.('.li-desc[contenteditable="true"]');
+  if (editor) window.rememberFormatSelection(editor);
+});
+
 function badge(status, map) {
   const s = map[status] || { label: status, badge: 'badge-gray' };
   return `<span class="badge ${s.badge}">${s.label}</span>`;
@@ -331,6 +424,7 @@ function navigate(path) {
 
 function route(hash) {
   destroyChart();
+  renderReportingYearMenu();
   const h = hash || window.location.hash || '#/';
   const parts = h.split('/').filter(Boolean);
   const base = parts[0] || '#';
@@ -398,7 +492,7 @@ function closeSidebar() {
 function renderDashboard() {
   setBreadcrumb([{ label: 'Dashboard' }]);
   setActions('');
-  const s = DB.getDashboardStats();
+  const s = DB.getDashboardStats(_reportingYear);
   const fmtRaw = n => {
     const val = Number(n) || 0;
     const s = `$${Math.abs(val).toLocaleString('es-AR', {minimumFractionDigits:0, maximumFractionDigits:0})}`;
@@ -447,7 +541,7 @@ function renderDashboard() {
   `).join('');
 
   // Recent projects
-  const recentProjects = (DB.getAll('projects') || []).slice().sort((a,b) => {
+  const recentProjects = (DB.getAll('projects') || []).filter(project => recordYear(project) === _reportingYear).sort((a,b) => {
     const ta = parseToMs(a.date || a.createdAt || a.created || a.created_at);
     const tb = parseToMs(b.date || b.createdAt || b.created || b.created_at);
     return tb - ta;
@@ -503,14 +597,14 @@ function renderDashboard() {
             </div>
           </div>
         </div>
-        <p class="text-xs text-gray-400 mt-4">El equivalente en USD es información interna: se calcula con el tipo de cambio que cargues en cada proyecto/presupuesto y sirve para comparar administraciones. Nunca se muestra al cliente.</p>
+        <p class="text-xs text-gray-400 mt-4">El equivalente en USD es información interna: se calcula con el tipo de cambio que cargues en cada proyecto y sirve para comparar administraciones. Nunca se muestra al cliente.</p>
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-5 gap-6">
         <!-- Chart -->
         <div class="lg:col-span-3 bg-white border border-gray-200 rounded-2xl p-6">
-          <h3 class="font-semibold text-gray-900 mb-1">Ganancias — últimos 12 meses (USD)</h3>
-          <p class="text-xs text-gray-400 mb-4">Normalizado a dólares para poder comparar Argentina, Perú y USA en el mismo gráfico.</p>
+          <h3 class="font-semibold text-gray-900 mb-1">Ganancias ${_reportingYear} (USD)</h3>
+          <p class="text-xs text-gray-400 mb-4">Enero a diciembre, normalizado a dólares para comparar Argentina, Perú y USA.</p>
           <canvas id="dash-chart" height="200"></canvas>
         </div>
 
@@ -546,17 +640,15 @@ function renderDashboard() {
         return;
       }
       const ctx = canvas.getContext ? canvas.getContext('2d') : canvas;
-      const months = DB.getMonthlyData() || [];
+      const months = DB.getMonthlyData(_reportingYear) || [];
       const labels = months.map(m => m.label || '');
-      // Se recortan los saldos negativos a 0: este gráfico es solo para comparar ganancias positivas
-      // entre administraciones; los saldos negativos (gastos > ingresos en el mes) no se muestran acá.
-      const dataARG = months.map(m => Math.max(0, Number(m.earningsARG || 0)));
-      const dataPERU = months.map(m => Math.max(0, Number(m.earningsPERU || 0)));
-      const dataUSA = months.map(m => Math.max(0, Number(m.earningsUSA || 0)));
-      const totalValues = dataARG.concat(dataPERU, dataUSA).reduce((s, v) => s + (Number(v) || 0), 0);
+      const dataARG = months.map(m => Number(m.earningsARG || 0));
+      const dataPERU = months.map(m => Number(m.earningsPERU || 0));
+      const dataUSA = months.map(m => Number(m.earningsUSA || 0));
+      const totalValues = dataARG.concat(dataPERU, dataUSA).reduce((s, v) => s + Math.abs(Number(v) || 0), 0);
       if (!totalValues) {
         // no data to display — show a friendly placeholder
-        if (canvas && canvas.parentElement) canvas.parentElement.innerHTML = '<div class="p-6 text-center text-sm text-gray-400">No hay datos normalizados a USD para los últimos 12 meses.<br><small>Revisá que tus proyectos ARG/PERU tengan cargado el tipo de cambio (ver pestaña "Información general" del proyecto o el presupuesto).</small></div>';
+        if (canvas && canvas.parentElement) canvas.parentElement.innerHTML = `<div class="p-6 text-center text-sm text-gray-400">No hay datos normalizados a USD para ${_reportingYear}.<br><small>Revisá que los proyectos ARG/PERU de ese año tengan cargado el tipo de cambio.</small></div>`;
         return;
       }
       _dashChart = new Chart(ctx, {
@@ -571,10 +663,10 @@ function renderDashboard() {
       },
       options: {
         responsive: true, maintainAspectRatio: true,
-        plugins: { legend: { position: 'top', labels: { font: { family: 'Aktiv Grotesk', size: 12 }, boxWidth: 12, boxHeight: 12 } } },
+        plugins: { legend: { position: 'top', labels: { font: { family: 'Inter', size: 12 }, boxWidth: 12, boxHeight: 12 } } },
         scales: {
           x: { grid: { display: false } },
-          y: { beginAtZero: true, grid: { color: '#f1f5f9' }, ticks: { font: { family: 'Aktiv Grotesk', size: 11 } } }
+          y: { beginAtZero: true, grid: { color: '#f1f5f9' }, ticks: { font: { family: 'Inter', size: 11 } } }
         }
       }
       });
@@ -596,7 +688,7 @@ function renderProjects() {
     Nuevo Proyecto
   </button>`);
 
-  const projects = (DB.getAll('projects') || []).slice();
+  const projects = (DB.getAll('projects') || []).filter(project => recordYear(project) === _reportingYear);
   // Helper to convert different date formats to milliseconds
   const toMs = (v) => {
     if (!v) return 0;
@@ -655,7 +747,7 @@ function renderProjects() {
       <td class="nowrap-cell">${adminBadge(p.administration)}</td>
       <td>${badge(p.status, PROJECT_STATUS)}</td>
       <td class="text-gray-700 font-medium nowrap-cell">${fmtCurrency(fin.totalIncome, p.administration)}</td>
-      <td class="font-medium nowrap-cell ${fin.profit >= 0 ? 'text-green-600' : 'text-red-600'}">${fmtCurrency(fin.profit, p.administration)}</td>
+       <td class="font-medium nowrap-cell ${fin.profit >= 0 ? 'text-green-600' : 'text-red-600'}">${fmtCurrency(fin.profit, p.administration)}</td>
       <td class="text-gray-400">${fmtDate(p.date)}</td>
       <td>
         <div class="flex gap-2" onclick="event.stopPropagation()">
@@ -860,12 +952,23 @@ async function deleteProject(id, name) {
 // ═══════════════════════════════════════════════════════════════
 // PROYECTOS — DETALLE (tabs)
 // ═══════════════════════════════════════════════════════════════
-function renderProjectDetail(id, tab = 'info') {
-  const project = DB.get('projects', id);
+async function renderProjectDetail(id, tab = 'info') {
+  let project = DB.get('projects', id);
   if (!project) {
     console.warn('renderProjectDetail: project not found for id=', id, 'existing projects=', DB.getAll('projects').map(p => p.id));
     notify('Proyecto no encontrado', 'error');
     return navigate('#/projects');
+  }
+  if (tab === 'invoices') {
+    const currentHash = window.location.hash;
+    try {
+      await ensureInvoicesFromApprovedBudgets(project);
+    } catch (error) {
+      console.error('Error creando facturas pendientes:', error);
+      notify('No se pudieron crear las facturas pendientes: ' + error.message, 'error');
+    }
+    if (window.location.hash !== currentHash) return;
+    project = DB.get('projects', id) || project;
   }
 
   const adm = ADMIN[project.administration] || ADMIN.ARG;
@@ -970,24 +1073,52 @@ function renderTabInfo(p) {
       ${p.administration !== 'USA' ? (() => {
         const fin = DB.getProjectFinancials(p.id);
         const rate = fin.exchangeRateToUSD || 0;
+        // OJO: esta celda es EDITABLE directamente acá (input + botón Guardar) — antes
+        // esta tarjeta era solo de lectura y para cambiar el tipo de cambio había que
+        // abrir el modal "Editar Proyecto" desde otro botón, lo cual generaba confusión
+        // (el usuario ve el número acá abajo pero no puede tocarlo). Ver
+        // saveProjectFxRateInline más abajo, que guarda con DB.update y refresca la pestaña.
         return `
         <div class="bg-white border border-gray-200 rounded-2xl p-6 md:col-span-2" style="border-style:dashed">
           <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
             <h3 class="font-semibold text-gray-900">Tipo de cambio (uso interno)</h3>
             <span class="badge badge-gray text-xs">No aparece en presupuestos ni facturas</span>
           </div>
+          <div class="flex items-end gap-3 flex-wrap mb-4">
+            <div class="form-group mb-0" style="max-width:220px">
+              <label class="form-label">Valor del dólar hoy (1 USD = ? ${ADMIN[p.administration]?.code||''})</label>
+              <input id="proj-fx-rate-inline" type="number" min="0" step="0.01" class="form-input" placeholder="Ej: 1500" value="${rate || ''}" onkeydown="if(event.key==='Enter'){event.preventDefault();saveProjectFxRateInline('${p.id}');}">
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="saveProjectFxRateInline('${p.id}')">Guardar</button>
+          </div>
           ${rate > 0 ? `
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-center">
-              <div><p class="text-xs text-gray-400 mb-1">Dólar cargado</p><p class="font-bold text-gray-900">1 USD = ${fmtCurrency(rate, p.administration)}</p></div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-center">
               <div><p class="text-xs text-gray-400 mb-1">Presupuesto aprobado en USD</p><p class="font-bold text-gray-900">${fmtCurrency(fin.budgetTotalUSD, 'USA')}</p></div>
               <div><p class="text-xs text-gray-400 mb-1">Ganancia en USD</p><p class="font-bold ${fin.profitUSD>=0?'text-green-600':'text-red-600'}">${fmtCurrency(fin.profitUSD, 'USA')}</p></div>
             </div>
-          ` : `<p class="text-sm text-gray-400">Todavía no cargaste el valor del dólar de este proyecto. Editalo desde "Editar" o desde el presupuesto para que aparezca normalizado en los gráficos de Inicio y Administraciones.</p>`}
+          ` : `<p class="text-sm text-gray-400">Cargá el valor del dólar arriba y guardá para ver el presupuesto y la ganancia normalizados a USD (se usa en los gráficos de Inicio y Administraciones).</p>`}
         </div>`;
       })() : ''}
     </div>
   `;
 }
+
+// saveProjectFxRateInline - Guarda el tipo de cambio (uso interno) directamente desde la
+// tarjeta de la pestaña "Información general" del proyecto, sin pasar por el modal
+// "Editar Proyecto". Deja el campo vacío/en 0 como "sin cargar" (undefined), igual que en
+// el formulario de edición completo.
+window.saveProjectFxRateInline = async function(projectId) {
+  const input = document.getElementById('proj-fx-rate-inline');
+  const rate = Number(input?.value) || undefined;
+  try {
+    await DB.update('projects', projectId, { exchangeRateToUSD: rate });
+    notify('Tipo de cambio guardado');
+    renderProjectDetail(projectId, 'info');
+  } catch (e) {
+    console.error('Error guardando tipo de cambio del proyecto:', e);
+    notify('No se pudo guardar el tipo de cambio', 'error');
+  }
+};
 
 // ═══════════════════════════════════════════════════════════════
 // PRESUPUESTOS (tab dentro de proyecto)
@@ -1161,7 +1292,12 @@ function renderBudgetForm(projectId, budgetId) {
         <div class="li-desc" data-placeholder="Descripción del ítem..." contenteditable="${!isReadOnly}" oninput="updateLiRow(${i})" onkeydown="liDescKeyDown(event, ${i})" onpaste="handleDescPaste(event)" onfocus="window._currentEditableIndex=${i}">${it.description ? it.description : ''}</div>
       </td>
       <td style="width:80px"><input type="number" min="0" value="${it.qty||1}" oninput="updateLiRow(${i})" id="li-qty-${i}" ${isReadOnly ? 'disabled' : ''}></td>
-      <td style="width:130px"><input type="number" min="0" step="0.01" value="${it.unitPrice||0}" oninput="updateLiRow(${i})" id="li-up-${i}" ${isReadOnly ? 'disabled' : ''}></td>
+      <!-- P. Unitario SIN min="0": a propósito, para poder cargar ítems en negativo (por
+           ejemplo una fila "Bonificación 10%" con precio unitario -20) y que se descuenten
+           del total del presupuesto. Ver calcBudgetBreakdown más arriba — suma qty*unitPrice
+           tal cual, sin recortar valores negativos, así que un ítem negativo funciona igual
+           en el total, en el PDF y en el cálculo de IVA/IGV (se aplica sobre el neto). -->
+      <td style="width:130px"><input type="number" step="0.01" value="${it.unitPrice||0}" oninput="updateLiRow(${i})" id="li-up-${i}" ${isReadOnly ? 'disabled' : ''}></td>
       <td style="width:150px;text-align:right;padding-right:12px;font-weight:600;color:#374151" id="li-total-${i}">${fmtCurrency((it.qty||1)*(it.unitPrice||0), budget?.administration || existingProject?.administration || 'ARG')}</td>
       ${!isReadOnly ? `<td style="width:40px">
         <button onclick="removeLiRow(${i})" class="btn btn-danger btn-icon btn-sm" style="padding:4px">
@@ -1191,12 +1327,6 @@ function renderBudgetForm(projectId, budgetId) {
   const totalAprobado = calcApprovedTotal(items, administrationKey, ivaMode);
   const total = calcBudgetTotal(items, administrationKey, ivaMode);
   const showApprovalCol = budget && budget.status !== 'borrador';
-
-  // Tipo de cambio (uso interno): convierte el TOTAL del presupuesto a USD para poder
-  // comparar administraciones en los gráficos de Inicio y Administraciones. Nunca sale
-  // en el PDF del presupuesto ni en la factura (buildBudgetHtmlFragment no lo usa).
-  const fxRate = Number(budget?.exchangeRateToUSD) || 0;
-  const fxUsdPreview = fxRate > 0 ? fmtCurrency(total / fxRate, 'USA') : '—';
 
   setContent(`
     <div class="max-w-5xl mx-auto space-y-6" id="budget-form-wrap">
@@ -1289,6 +1419,14 @@ function renderBudgetForm(projectId, budgetId) {
             <input id="b-event-date" type="date" class="form-input" value="${budget?.eventDate||''}">
           </div>
           <div class="form-group mb-0">
+            <label class="form-label">Tipo de Proyecto</label>
+            <input id="b-project-type" class="form-input" value="${esc(budget?.projectType||'')}" placeholder="Ej: Producción audiovisual">
+          </div>
+          <div class="form-group mb-0">
+            <label class="form-label">Fecha de Armado</label>
+            <input id="b-assembly-date" type="date" class="form-input" value="${budget?.assemblyDate||''}">
+          </div>
+          <div class="form-group mb-0">
             <label class="form-label">Fecha de Montaje</label>
             <input id="b-setup-date" type="date" class="form-input" value="${budget?.setupDate||''}">
           </div>
@@ -1313,8 +1451,8 @@ function renderBudgetForm(projectId, budgetId) {
         </div>
         <div class="p-3 border-b border-gray-100" style="background:#fff">
           <div id="li-toolbar" style="display:flex;gap:8px;align-items:center">
-            <button class="btn btn-sm btn-secondary" onclick="execFormat('bold')" title="Negrita"><span style="font-weight:700">N</span></button>
-            <button class="btn btn-sm btn-secondary" onclick="execFormat('italic')" title="Cursiva"><span style="font-style:italic;font-weight:600">K</span></button>
+            <button type="button" class="btn btn-sm btn-secondary" onmousedown="event.preventDefault()" onclick="execFormat('bold')" title="Negrita"><span style="font-weight:700">N</span></button>
+            <button type="button" class="btn btn-sm btn-secondary" onmousedown="event.preventDefault()" onclick="execFormat('italic')" title="Cursiva"><span style="font-style:italic;font-weight:600">K</span></button>
             <select onchange="execFormat('fontSize', this.value)" class="form-select" style="max-width:120px">
               <option value="">Tamaño</option>
               <option value="2">Pequeño</option>
@@ -1367,23 +1505,12 @@ function renderBudgetForm(projectId, budgetId) {
         </div>
       </div>
 
-      <div id="b-fx-block" class="bg-white border border-gray-200 rounded-2xl p-6" style="border-style:dashed;${administrationKey === 'USA' ? 'display:none' : ''}">
-        <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
-          <h3 class="font-semibold text-gray-900">Tipo de cambio (uso interno)</h3>
-          <span class="badge badge-gray text-xs">No aparece en el presupuesto ni en la factura</span>
-        </div>
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
-          <div class="form-group mb-0">
-            <label class="form-label">Valor del dólar hoy (1 USD = ? ${adm.code})</label>
-            <input id="b-fx-rate" type="number" min="0" step="0.01" class="form-input" placeholder="Ej: 1500" value="${fxRate || ''}" oninput="updateBudgetFxPreview()">
-          </div>
-          <div>
-            <p class="text-xs text-gray-500 mb-1">Equivalente del total en USD</p>
-            <p class="text-lg font-bold text-gray-900" id="b-fx-usd-preview">${fxUsdPreview}</p>
-          </div>
-        </div>
-        <p class="text-xs text-gray-400 mt-3">Se usa solo para normalizar a dólares los gráficos de Inicio y Administraciones. Es información interna: nunca se muestra al cliente.</p>
-      </div>
+      <!-- [SECCIÓN: TIPO DE CAMBIO] — el campo "Tipo de cambio (uso interno)" que antes
+           estaba acá se sacó del formulario de Presupuestos. Ahora se carga únicamente
+           desde el Proyecto (pestaña "Información general", abajo de todo) — buscar
+           "pf-fx-rate" en la sección PROYECTOS — Formulario más arriba en este archivo.
+           Los presupuestos viejos que ya tenían un valor guardado lo siguen respetando
+           como respaldo (ver DB._effectiveExchangeRate), pero ya no se edita desde acá. -->
 
       <!-- Notes -->
       <div class="bg-white border border-gray-200 rounded-2xl p-6">
@@ -1446,12 +1573,6 @@ function renderBudgetForm(projectId, budgetId) {
       const ivaBlock = document.getElementById('iva-block');
       const taxSupported = e.target.value === 'ARG' || e.target.value === 'PERU';
       if (ivaBlock) ivaBlock.style.display = taxSupported ? '' : 'none';
-
-      // Mostrar/ocultar el bloque de tipo de cambio (no aplica a USA, ya está en USD)
-      const fxBlock = document.getElementById('b-fx-block');
-      if (fxBlock) fxBlock.style.display = e.target.value === 'USA' ? 'none' : '';
-      const fxRateLabel = document.querySelector('#b-fx-block .form-label');
-      if (fxRateLabel && selectedAdm) fxRateLabel.textContent = `Valor del dólar hoy (1 USD = ? ${selectedAdm.code})`;
 
       const label = document.querySelector('#iva-block .form-label');
       const ivaText = document.querySelector('#iva-block #b-iva-con + span');
@@ -1516,23 +1637,6 @@ function renderBudgetForm(projectId, budgetId) {
     if (partial) partial.textContent = fmtCurrency(approved, window._budgetAdm);
     syncBudgetTaxLabel(String(window._budgetAdm || '').toUpperCase());
     updateTotals();
-  };
-
-  // updateBudgetFxPreview - Recalcula el equivalente en USD del total del presupuesto
-  // a partir del tipo de cambio cargado (uso interno, no va al PDF ni a la factura).
-  window.updateBudgetFxPreview = function() {
-    const previewEl = document.getElementById('b-fx-usd-preview');
-    if (!previewEl) return;
-    const rate = Number(document.getElementById('b-fx-rate')?.value) || 0;
-    const adm = String(window._budgetAdm || '').toUpperCase();
-    const conChecked = document.getElementById('b-iva-con')?.checked;
-    const ivaMode = (adm === 'ARG' || adm === 'PERU') ? (conChecked ? 'con' : 'sin') : 'sin';
-    const grand = calcBudgetTotal(window._liItems || [], window._budgetAdm, ivaMode);
-    if (!(rate > 0)) {
-      previewEl.textContent = '—';
-      return;
-    }
-    previewEl.textContent = fmtCurrency(grand / rate, 'USA');
   };
 
   window.toggleItemApproval = (i) => {
@@ -1644,7 +1748,6 @@ function renderBudgetForm(projectId, budgetId) {
         `;
       }
     }
-    if (typeof window.updateBudgetFxPreview === 'function') window.updateBudgetFxPreview();
   }
 
   function rebuildLiTable() {
@@ -1659,10 +1762,11 @@ function renderBudgetForm(projectId, budgetId) {
         ${showApprovalCol ? `<td style="text-align:center;width:60px">
           <input type="checkbox" ${it.aprobado ? 'checked' : ''} ${isReadOnly ? 'disabled' : ''} onchange="toggleItemApproval(${i})" style="width:18px;height:18px;cursor:pointer">
         </td>` : ''}
-        <td><div class="li-desc" contenteditable="${!isReadOnly}" oninput="updateLiRow(${i})" onpaste="handleDescPaste(event)" onfocus="window._currentEditableIndex=${i}">${it.description ? it.description : ''}</div></td>
+        <td><div class="li-desc" data-placeholder="Descripción del ítem..." contenteditable="${!isReadOnly}" oninput="updateLiRow(${i})" onkeydown="liDescKeyDown(event, ${i})" onpaste="handleDescPaste(event)" onfocus="window._currentEditableIndex=${i}">${it.description ? it.description : ''}</div></td>
         <td><input type="number" min="0" value="${it.qty||1}" oninput="updateLiRow(${i})" id="li-qty-${i}" ${isReadOnly ? 'disabled' : ''}></td>
         <!-- Unidad removed -->
-        <td><input type="number" min="0" step="0.01" value="${it.unitPrice||0}" oninput="updateLiRow(${i})" id="li-up-${i}" ${isReadOnly ? 'disabled' : ''}></td>
+        <!-- P. Unitario SIN min="0" a propósito — permite ítems en negativo (bonificaciones/descuentos). Ver la misma fila más arriba en este archivo. -->
+        <td><input type="number" step="0.01" value="${it.unitPrice||0}" oninput="updateLiRow(${i})" id="li-up-${i}" ${isReadOnly ? 'disabled' : ''}></td>
         <td style="text-align:right;padding-right:12px;font-weight:600;color:#374151" id="li-total-${i}">${fmtCurrency((it.qty||1)*(it.unitPrice||0), window._budgetAdm)}</td>
         ${!isReadOnly ? `<td><button onclick="removeLiRow(${i})" class="btn btn-danger btn-icon btn-sm" style="padding:4px"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button></td>` : '<td></td>'}
       </tr>
@@ -1686,29 +1790,6 @@ function renderBudgetForm(projectId, budgetId) {
     updateTotals();
   }
 
-  // Minimal rich text commands for li descriptions
-  window.execFormat = function(cmd, value) {
-    try {
-      document.execCommand(cmd, false, value || null);
-      if (typeof window._currentEditableIndex !== 'undefined') updateLiRow(window._currentEditableIndex);
-      if (typeof window._currentInvEditableIndex !== 'undefined') updateInvRow(window._currentInvEditableIndex);
-    } catch (e) { console.warn('Format error', e); }
-  }
-
-  // Place caret at end of contenteditable element
-  function placeCaretAtEnd(el) {
-    if (!el) return;
-    el.focus();
-    try {
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      range.collapse(false);
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      sel.addRange(range);
-    } catch (e) { /* ignore */ }
-  }
-
   // Handle Enter / Shift+Enter in li description cells
   window.liDescKeyDown = function(e, index) {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -1719,13 +1800,6 @@ function renderBudgetForm(projectId, budgetId) {
     // Shift+Enter default: insert newline
   }
 
-  // Handle Enter in invoice description cells (same behavior as budget items)
-  window.invDescKeyDown = function(e, index) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      addInvRow();
-    }
-  }
 }
 
 /**
@@ -1844,7 +1918,7 @@ window.showApprovalModal = async function(budgetId) {
         client: budget.clientName || '',
         administration: budget.administration || 'ARG',
         status: 'aprobado',
-        date: today(),
+        date: budget.date || today(),
         budgetId: budgetId,
         budgetAmount: approvedAmount,
         number: projNum
@@ -1897,7 +1971,7 @@ window.showApprovalModal = async function(budgetId) {
 };
 
 // Create invoice from an approved budget
-window.createInvoiceFromBudget = async function(budgetId) {
+window.createInvoiceFromBudget = async function(budgetId, options = {}) {
   const budget = DB.get('budgets', budgetId);
   if (!budget) { notify('Presupuesto no encontrado', 'warning'); return null; }
 
@@ -1925,20 +1999,20 @@ window.createInvoiceFromBudget = async function(budgetId) {
       client: budget.clientName,
       administration: 'USA',
       status: 'aprobado',
-      date: today(),
+      date: budget.date || today(),
       budgetId: budgetId,
       budgetAmount: calcBudgetTotal(budget.items || [], 'USA', getBudgetIvaMode(budget)), // USA no tiene IVA/IGV
       number: projNum,
-      exchangeRateToUSD: budget.exchangeRateToUSD, // uso interno, para normalizar gráficos a USD
+      // El tipo de cambio (uso interno, para normalizar gráficos a USD) ya no se copia de
+      // acá — se carga directamente en el proyecto (pestaña "Información general").
     });
     await DB.update('budgets', budgetId, { projectId: project.id });
   }
 
   // Build invoice data from budget
   const items = (budget.items || []).map(it => ({ description: it.description, qty: it.qty, unitPrice: it.unitPrice }));
-  // For US invoices, use the budget-style number (yymmddNNN) so invoice numbers match budgets
-  const num = (budget.administration === 'USA') ? await DB.nextBudgetNumber() : await DB.nextNumber('invoiceCounter');
-  const inv = await DB.add('invoices', {
+  const num = await DB.nextBudgetNumber(today());
+  const inv = await DB.saveProjectInvoice(project.id, null, {
     budgetId: budgetId,
     projectId: project.id,
     clientName: budget.clientName,
@@ -1948,11 +2022,16 @@ window.createInvoiceFromBudget = async function(budgetId) {
     notes: budget.notes || '',
     items,
     total: calcBudgetTotal(items),
-    number: num
+    number: num,
+    invoiceNumber: num,
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+    history: []
   });
 
   notify('Factura creada desde presupuesto', 'success');
-  navigate(`#/projects/${project.id}/invoices/${inv.id}`);
+  if (options.navigate !== false) navigate(`#/projects/${project.id}/invoices/${inv.id}`);
   return inv;
 };
 
@@ -1977,14 +2056,13 @@ window.saveBudgetForm = async function(projectId, budgetId) {
     const administration = document.getElementById('b-admin')?.value || (budgetId ? DB.get('budgets', budgetId)?.administration : 'ARG') || 'ARG';
     const ivaMode = administration === 'PERU' ? 'con' : (administration === 'ARG' && document.getElementById('b-iva-con')?.checked ? 'con' : 'sin');
     const total = calcBudgetTotal(items, administration, ivaMode);
-    // Tipo de cambio (uso interno): no aplica a USA, que ya está en USD
-    const fxRateInput = document.getElementById('b-fx-rate');
-    const exchangeRateToUSD = (fxRateInput && administration !== 'USA') ? (Number(fxRateInput.value) || undefined) : undefined;
 
     // Datos del evento (opcionales): salen impresos en el PDF del presupuesto.
     const country = document.getElementById('b-country')?.value.trim() || '';
     const city = document.getElementById('b-city')?.value.trim() || '';
     const eventDate = document.getElementById('b-event-date')?.value || '';
+    const projectType = document.getElementById('b-project-type')?.value.trim() || '';
+    const assemblyDate = document.getElementById('b-assembly-date')?.value || '';
     const setupDate = document.getElementById('b-setup-date')?.value || '';
     const venueName = document.getElementById('b-venue-name')?.value.trim() || '';
     const venueAddress = document.getElementById('b-venue-address')?.value.trim() || '';
@@ -1993,7 +2071,7 @@ window.saveBudgetForm = async function(projectId, budgetId) {
 
     notify('Guardando presupuesto...', 'info');
 
-    let data = { date, status, notes, items, total, administration, exchangeRateToUSD, country, city, eventDate, setupDate, venueName, venueAddress };
+    let data = { date, status, notes, items, total, administration, country, city, eventDate, projectType, assemblyDate, setupDate, venueName, venueAddress };
 
     // Check if this budget has an associated project (either from parameter or previously approved)
     const hasAssociatedProject = !!projectId || window._budgetHasProject;
@@ -2092,11 +2170,26 @@ window.saveBudgetForm = async function(projectId, budgetId) {
       else if (ivaSin?.checked) data.iva = 'sin';
       else data.iva = undefined;
       await DB.update('budgets', budgetId, data);
-      // Si este presupuesto está vinculado a un proyecto, sincronizar el tipo de cambio
-      // para que los gráficos de Inicio y Administraciones queden actualizados.
-      if (data.projectId && exchangeRateToUSD !== undefined) {
-        try { await DB.update('projects', data.projectId, { exchangeRateToUSD }); } catch (e) { console.warn('No se pudo sincronizar el tipo de cambio con el proyecto:', e); }
+
+      // Sincronizar el "Presupuesto Aprobado" congelado en el PROYECTO (project.budgetAmount).
+      // Por qué: la Ganancia de Proyectos/Administración/Inicio ahora se calcula SIEMPRE desde
+      // este valor guardado en el proyecto (ver getProjectFinancials en db.js/dbfirebase.js) y
+      // ya NO se recalcula leyendo los items del presupuesto en cada pantalla — eso era lo que
+      // generaba números distintos según la pantalla (y el lío con el IVA/IGV, que a veces se
+      // aplicaba y a veces no). Si edita un presupuesto que YA está aprobado y vinculado a un
+      // proyecto, recalculamos ese monto congelado con la MISMA fórmula que se usa al aprobar
+      // (calcBudgetTotal/calcApprovedTotal + getBudgetIvaMode), para que quede al día.
+      if (data.projectId && (data.status === 'aprobado-total' || data.status === 'aprobado-parcial')) {
+        const confirmedAmount = data.status === 'aprobado-parcial'
+          ? calcApprovedTotal(items, administration, ivaMode)
+          : calcBudgetTotal(items, administration, ivaMode);
+        const linkedProject = DB.get('projects', data.projectId);
+        await DB.update('projects', data.projectId, {
+          ...(linkedProject?.invoiceTotals ? {} : { budgetAmount: confirmedAmount }),
+          date: data.date || today()
+        });
       }
+
       notify('Presupuesto guardado');
       navigate('#/presupuestos');
     } else {
@@ -2144,11 +2237,12 @@ window.approveBudget = async function(budgetId, projectId) {
       client: budget.clientName,
       administration: budget.administration,
       status: 'aprobado',
-      date: today(),
+      date: budget.date || today(),
       budgetId: budgetId,
       budgetAmount: calcBudgetTotal(budget.items || [], budget.administration, getBudgetIvaMode(budget)),
       number: projNum,
-      exchangeRateToUSD: budget.exchangeRateToUSD, // uso interno, para normalizar gráficos a USD
+      // El tipo de cambio (uso interno, para normalizar gráficos a USD) ya no se copia de
+      // acá — se carga directamente en el proyecto (pestaña "Información general").
     });
   }
 
@@ -2241,14 +2335,16 @@ function renderTabOperations(project) {
     </tr>
   `).join('') : `<tr><td colspan="4" class="py-8 text-center text-gray-400 text-sm">Sin ingresos registrados</td></tr>`;
 
+  const presupuestoAprobado = fin.budgetTotal;
+  const gananciaFinanzas = fin.profit;
   return `
     <!-- Resumen financiero -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
       ${[
-        ['Presupuesto Aprobado', DB.getBudgetsByProject(project.id).filter(b=>['aprobado-total','aprobado-parcial'].includes(b.status)).reduce((s,b)=>s+calcBudgetTotal(b.items||[], b.administration, getBudgetIvaMode(b)),0), 'text-gray-900'],
+        [project.invoiceTotals ? 'Facturación vigente' : 'Presupuesto Aprobado', presupuestoAprobado, 'text-gray-900'],
         ['Total Ingresos', fin.totalIncome, 'text-green-600'],
         ['Total Gastos', fin.totalExpense, 'text-red-600'],
-        ['Ganancia', fin.profit, fin.profit >= 0 ? 'text-green-600' : 'text-red-600'],
+        ['Ganancia', gananciaFinanzas, gananciaFinanzas >= 0 ? 'text-green-600' : 'text-red-600'],
       ].map(([l,v,c]) => {
         // For "Presupuesto Aprobado" mostrar nota de impuesto: el monto de arriba YA incluye
         // el IVA/IGV cuando corresponde (ver getBudgetIvaMode), esta nota es solo informativa.
@@ -2417,8 +2513,9 @@ async function deleteIncome(id, projectId) {
   renderProjectDetail(projectId, 'operations');
 }
 
-function ensureInvoicesFromApprovedBudgets(project) {
+async function ensureInvoicesFromApprovedBudgets(project) {
   if (!project || project.administration !== 'USA') return;
+  if (project.invoiceTotals) return;
 
   const allInvoices = DB.getAll('invoices') || [];
   const approvedBudgets = (DB.getBudgetsByProject(project.id) || []).filter(b =>
@@ -2426,34 +2523,20 @@ function ensureInvoicesFromApprovedBudgets(project) {
     !allInvoices.some(inv => inv.projectId === project.id && inv.budgetId === b.id)
   );
 
-  approvedBudgets.forEach(budget => {
-    const items = (budget.items || []).map(it => ({ description: it.description, qty: it.qty, unitPrice: it.unitPrice }));
-    const num = (project.administration === 'USA') ? DB.nextBudgetNumber() : DB.nextNumber('invoiceCounter');
-    DB.add('invoices', {
-      budgetId: budget.id,
-      projectId: project.id,
-      clientName: budget.clientName || project.client || '',
-      date: budget.date || today(),
-      dueDate: '',
-      status: 'pendiente',
-      notes: budget.notes || '',
-      items,
-      total: calcBudgetTotal(items),
-      number: num
-    });
-  });
+  for (const budget of approvedBudgets) {
+    await createInvoiceFromBudget(budget.id, { navigate: false });
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
 // FACTURACIÓN (tab — solo USA)
 // ═══════════════════════════════════════════════════════════════
 function renderTabInvoices(project) {
-  ensureInvoicesFromApprovedBudgets(project);
   const invoices = DB.getInvoicesByProject(project.id).sort((a,b) => (a.number||0) - (b.number||0));
   const rows = invoices.length ? invoices.map(inv => {
     const total = calcBudgetTotal(inv.items || []);
     return `<tr>
-      <td class="font-medium">${esc(formatInvoiceRef(inv))}</td>
+      <td class="font-medium">${esc(formatInvoiceRef(inv))}<small class="block text-gray-400">Versión ${inv.version || 1} · ${(inv.history || []).length} anteriores</small></td>
       <td>${badge(inv.status, INVOICE_STATUS)}</td>
       <td class="font-semibold text-gray-900">${fmtCurrency(total, project.administration)}</td>
       <td class="text-gray-400">${fmtDate(inv.date)}</td>
@@ -2506,6 +2589,11 @@ function renderInvoiceForm(projectId, invoiceId) {
     return;
   }
   const inv = invoiceId ? DB.get('invoices', invoiceId) : null;
+  if (invoiceId && (!inv || inv.projectId !== projectId)) {
+    notify('Factura no encontrada en este proyecto.', 'error');
+    return navigate(`#/projects/${projectId}/invoices`);
+  }
+  window._invoiceEditVersion = inv ? (inv.version || 1) : null;
   const num = inv?.number ?? inv?.invoiceNumber ?? '(nueva)';
   const cfg = DB.getConfig() || {};
 
@@ -2532,11 +2620,11 @@ function renderInvoiceForm(projectId, invoiceId) {
         <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
           <div class="form-group mb-0">
             <label class="form-label">Bill To</label>
-            <input id="inv-client" class="form-input" value="${esc(project.client||'')}" placeholder="Client name">
+            <input id="inv-client" class="form-input" value="${esc(inv?.clientName ?? project.client ?? '')}" placeholder="Client name">
           </div>
           <div class="form-group mb-0">
             <label class="form-label">Invoice Date</label>
-            <input id="inv-date" type="date" class="form-input" value="${inv?.date||today()}">
+            <input id="inv-date" type="date" class="form-input" value="${inv?.date||today()}" required>
           </div>
           <div class="form-group mb-0">
             <label class="form-label">Due Date</label>
@@ -2556,8 +2644,8 @@ function renderInvoiceForm(projectId, invoiceId) {
         </div>
         <div class="p-3 border-b border-gray-100" style="background:#fff">
           <div id="inv-li-toolbar" style="display:flex;gap:8px;align-items:center">
-            <button class="btn btn-sm btn-secondary" onclick="execFormat('bold')" title="Negrita"><span style="font-weight:700">N</span></button>
-            <button class="btn btn-sm btn-secondary" onclick="execFormat('italic')" title="Cursiva"><span style="font-style:italic;font-weight:600">K</span></button>
+            <button type="button" class="btn btn-sm btn-secondary" onmousedown="event.preventDefault()" onclick="execFormat('bold')" title="Negrita"><span style="font-weight:700">N</span></button>
+            <button type="button" class="btn btn-sm btn-secondary" onmousedown="event.preventDefault()" onclick="execFormat('italic')" title="Cursiva"><span style="font-style:italic;font-weight:600">K</span></button>
             <select onchange="execFormat('fontSize', this.value)" class="form-select" style="max-width:120px">
               <option value="">Tamaño</option>
               <option value="2">Pequeño</option>
@@ -2603,6 +2691,8 @@ function renderInvoiceForm(projectId, invoiceId) {
         <label class="form-label">Notes / Payment Terms</label>
         <textarea id="inv-notes" class="form-textarea" rows="2" placeholder="Payment terms, bank details...">${esc(inv?.notes||'')}</textarea>
       </div>
+      <p class="text-sm text-gray-500">Podés editar Invoice Date. Al guardar, cada factura o versión recibe un número único con la fecha elegida y un correlativo diario, incluso si varias tienen la misma fecha. El monto del proyecto suma solo las facturas vigentes, no sus versiones.</p>
+      ${inv ? renderInvoiceHistory(inv) : ''}
     </div>
   `);
 
@@ -2650,14 +2740,51 @@ function renderInvoiceForm(projectId, invoiceId) {
   window.removeInvRow = (i) => {
     window._invItems.splice(i, 1);
     document.getElementById('inv-li-tbody').innerHTML = window._invItems.map((it,j) => {
-      if (showUnit) return `<tr id="inv-li-row-${j}"><td><input type="text" value="${esc(it.description||'')}" oninput="updateInvRow(${j})"></td><td><input type="number" value="${it.qty||1}" oninput="updateInvRow(${j})"></td><td><input type="text" value="${esc(it.unit||'')}" oninput="updateInvRow(${j})"></td><td><input type="number" value="${it.unitPrice||0}" oninput="updateInvRow(${j})"></td><td id="inv-total-${j}" style="text-align:right;padding-right:12px;font-weight:600">${fmtCurrency((it.qty||1)*(it.unitPrice||0),'USA')}</td><td><button onclick="removeInvRow(${j})" class="btn btn-danger btn-icon btn-sm" style="padding:4px"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button></td></tr>`;
-      return `<tr id="inv-li-row-${j}"><td><input type="text" value="${esc(it.description||'')}" oninput="updateInvRow(${j})"></td><td><input type="number" value="${it.qty||1}" oninput="updateInvRow(${j})"></td><td><input type="number" value="${it.unitPrice||0}" oninput="updateInvRow(${j})"></td><td id="inv-total-${j}" style="text-align:right;padding-right:12px;font-weight:600">${fmtCurrency((it.qty||1)*(it.unitPrice||0),'USA')}</td><td><button onclick="removeInvRow(${j})" class="btn btn-danger btn-icon btn-sm" style="padding:4px"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button></td></tr>`;
+      const description = `<td><div class="li-desc" data-placeholder="Description..." contenteditable="true" oninput="updateInvRow(${j})" onkeydown="invDescKeyDown(event, ${j})" onpaste="handleDescPaste(event)" onfocus="window._currentInvEditableIndex=${j}">${it.description || ''}</div></td>`;
+      const unit = showUnit ? `<td><input type="text" value="${esc(it.unit||'')}" oninput="updateInvRow(${j})"></td>` : '';
+      return `<tr id="inv-li-row-${j}">${description}<td><input id="inv-qty-${j}" type="number" min="0" value="${it.qty||1}" oninput="updateInvRow(${j})"></td>${unit}<td><input id="inv-up-${j}" type="number" min="0" step="0.01" value="${it.unitPrice||0}" oninput="updateInvRow(${j})"></td><td id="inv-total-${j}" style="text-align:right;padding-right:12px;font-weight:600">${fmtCurrency((it.qty||1)*(it.unitPrice||0),'USA')}</td><td><button onclick="removeInvRow(${j})" class="btn btn-danger btn-icon btn-sm" style="padding:4px"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button></td></tr>`;
     }).join('');
     document.getElementById('inv-total-grand').textContent = fmtCurrency(calcBudgetTotal(window._invItems), 'USA');
   };
 }
 
+function invoiceSnapshot(inv) {
+  return {
+    version: inv.version || 1,
+    number: inv.number ?? inv.invoiceNumber ?? '',
+    clientName: inv.clientName || '',
+    date: inv.date || '',
+    dueDate: inv.dueDate || '',
+    status: inv.status || 'borrador',
+    notes: inv.notes || '',
+    items: (inv.items || []).map(item => ({ ...item })),
+    total: calcBudgetTotal(inv.items || []),
+    generatedAt: inv.generatedAt || (parseToMs(inv.createdAt) ? new Date(parseToMs(inv.createdAt)).toISOString() : null)
+  };
+}
+
+function renderInvoiceHistory(inv) {
+  const versions = [...(inv.history || []), invoiceSnapshot(inv)].reverse();
+  return `<div class="bg-white border border-gray-200 rounded-2xl p-6">
+    <h3 class="font-semibold text-gray-900 mb-4">Historial de versiones</h3>
+    ${versions.map(version => `<details class="border-b border-gray-100 py-3">
+      <summary class="cursor-pointer text-sm font-medium">Versión ${version.version} · ${esc(formatInvoiceRef(version))} · ${fmtDate(version.date)} · ${fmtCurrency(version.total, 'USA')}${version.version === (inv.version || 1) ? ' (vigente)' : ''}</summary>
+      <div class="space-y-3 mt-3 text-sm">
+        <p>Cliente: ${esc(version.clientName)} · Vencimiento: ${fmtDate(version.dueDate)} · ${badge(version.status, INVOICE_STATUS)}</p>
+        ${version.generatedAt ? `<p class="text-gray-400">Generada: ${esc(new Date(parseToMs(version.generatedAt)).toLocaleString('es-AR'))}</p>` : ''}
+        <table class="data-table"><thead><tr><th>Descripción</th><th>Cantidad</th><th>Precio unitario</th><th>Total</th></tr></thead>
+          <tbody>${version.items.map(item => `<tr><td>${sanitizeItemDescriptionHtml(item.description || '')}</td><td>${Number(item.qty || 0)}</td><td>${fmtCurrency(item.unitPrice, 'USA')}</td><td>${fmtCurrency(Number(item.qty || 0) * Number(item.unitPrice || 0), 'USA')}</td></tr>`).join('')}</tbody>
+        </table>
+        <p style="white-space:pre-wrap">${esc(version.notes)}</p>
+        <button class="btn btn-secondary btn-sm" onclick="previewInvoicePDF('${inv.id}',${version.version})">Vista previa</button>
+        <button class="btn btn-secondary btn-sm" onclick="exportInvoicePDF('${inv.id}',${version.version})">PDF de esta versión</button>
+      </div>
+    </details>`).join('')}
+  </div>`;
+}
+
 window.saveInvoiceForm = async function(projectId, invoiceId) {
+  if (window._savingInvoice) return;
   const project = DB.get('projects', projectId);
   if (!project || !canGenerateInvoicesForProject(project)) {
     notify('Solo la administración United States puede generar facturas.', 'error');
@@ -2668,33 +2795,57 @@ window.saveInvoiceForm = async function(projectId, invoiceId) {
   const data = {
     projectId,
     clientName: document.getElementById('inv-client')?.value.trim() || '',
-    date: document.getElementById('inv-date')?.value || today(),
+    date: document.getElementById('inv-date')?.value || '',
     dueDate: document.getElementById('inv-due')?.value || '',
     status: document.getElementById('inv-status')?.value || 'borrador',
     notes: document.getElementById('inv-notes')?.value || '',
     items, total: calcBudgetTotal(items),
   };
-  if (invoiceId) {
-    await DB.update('invoices', invoiceId, data);
-    notify('Factura actualizada');
-  } else {
-    // Para facturas USA, reutilizar número de presupuesto aprobado si existe
-    let num;
-    if (project?.administration === 'USA') {
-      const activeBudget = DB.getActiveBudget(projectId);
-      num = activeBudget?.number ?? activeBudget?.budgetNumber ?? null;
+  const expectedVersion = window._invoiceEditVersion;
+  window._savingInvoice = true;
+  try {
+    const existing = invoiceId ? DB.get('invoices', invoiceId) : null;
+    if (invoiceId && (!existing || existing.projectId !== projectId || (existing.version || 1) !== expectedVersion)) {
+      throw new Error('La factura cambió o fue eliminada. Volvé a abrirla antes de guardar.');
     }
-    if (!num) num = (project?.administration === 'USA') ? await DB.nextBudgetNumber() : await DB.nextNumber('invoiceCounter');
-    await DB.add('invoices', { ...data, number: num, invoiceNumber: (typeof num === 'string' ? num : undefined) });
-    notify('Factura creada');
+    const previous = existing ? { ...invoiceSnapshot(existing), projectId: existing.projectId } : null;
+    if (previous && Object.keys(data).every(key => JSON.stringify(data[key]) === JSON.stringify(previous[key]))) {
+      notify('No hay cambios para guardar.', 'info');
+      return;
+    }
+    const num = await DB.nextBudgetNumber(data.date);
+    const generatedAt = new Date().toISOString();
+    await DB.saveProjectInvoice(projectId, invoiceId || null, {
+      ...data,
+      number: num,
+      invoiceNumber: num,
+      version: existing ? (existing.version || 1) + 1 : 1,
+      generatedAt,
+      ...(existing ? {} : { createdAt: generatedAt }),
+      history: existing ? [...(existing.history || []), invoiceSnapshot(existing)] : []
+    }, expectedVersion);
+    notify(existing ? 'Nueva versión guardada y monto del proyecto actualizado' : 'Factura creada y monto del proyecto actualizado');
+    navigate(`#/projects/${projectId}/invoices`);
+  } catch (error) {
+    console.error('Error guardando factura:', error);
+    notify('No se pudo guardar la factura: ' + error.message, 'error');
+  } finally {
+    window._savingInvoice = false;
   }
-  navigate(`#/projects/${projectId}/invoices`);
 };
 
 async function deleteInvoice(id, projectId) {
-  if (!await confirmDelete('esta factura')) return;
-  DB.remove('invoices', id); notify('Factura eliminada', 'info');
-  renderProjectDetail(projectId, 'invoices');
+  if (!await confirmDelete('esta factura y todo su historial de versiones')) return;
+  try {
+    const inv = DB.get('invoices', id);
+    if (!inv) throw new Error('Factura no encontrada.');
+    await DB.saveProjectInvoice(projectId, id, null, inv.version || 1);
+    notify('Factura eliminada y monto del proyecto actualizado', 'info');
+    renderProjectDetail(projectId, 'invoices');
+  } catch (error) {
+    console.error('Error eliminando factura:', error);
+    notify('No se pudo eliminar la factura: ' + error.message, 'error');
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2709,7 +2860,7 @@ function renderTracker() {
     </button>
   `);
 
-  const budgets = DB.getAll('budgets').sort((a, b) => {
+  const budgets = DB.getAll('budgets').filter(budget => recordYear(budget) === _reportingYear).sort((a, b) => {
     const ta = a && (a.date ? new Date(a.date).getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0));
     const tb = b && (b.date ? new Date(b.date).getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0));
     return (tb || 0) - (ta || 0);
@@ -2811,6 +2962,7 @@ function renderAllInvoices() {
   setActions('');
 
   const invoices = DB.getAll('invoices')
+    .filter(inv => recordYear(inv) === _reportingYear)
     .filter(inv => {
       const project = DB.get('projects', inv.projectId);
       return project && project.administration === 'USA';
@@ -2852,7 +3004,7 @@ function renderAllInvoices() {
       <div class="table-wrap">
         <table class="data-table">
           <thead><tr><th>#</th><th>Proyecto</th><th>Cliente</th><th>Estado</th><th>Total (USD)</th><th>Fecha</th><th></th></tr></thead>
-          <tbody id="inv-global-body">${rows.length ? rows.join('') : '<tr><td colspan="7"><div class="empty-state"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 14l6-6m-5.5.5h.01m4.99 5h.01M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16l3.5-2 3.5 2 3.5-2 3.5 2z"/></svg><p>Sin facturas</p><small>Las facturas de proyectos de EE.UU. apareceran aqui</small></div></td></tr>'}</tbody>
+          <tbody id="inv-global-body">${rows.length ? rows.join('') : `<tr><td colspan="7"><div class="empty-state"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 14l6-6m-5.5.5h.01m4.99 5h.01M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16l3.5-2 3.5 2 3.5-2 3.5 2z"/></svg><p>Sin facturas en ${_reportingYear}</p><small>Las facturas de proyectos de EE.UU. aparecerán aquí</small></div></td></tr>`}</tbody>
         </table>
       </div>
     </div>
@@ -2878,12 +3030,12 @@ function renderAdministraciones() {
   const usdByAdmin = {};
 
   const cards = Object.entries(ADMIN).map(([key, a]) => {
-    const allProjects = DB.getAll('projects').filter(p => p.administration === key);
+    const allProjects = DB.getAll('projects').filter(p => p.administration === key && recordYear(p) === _reportingYear);
     const pendingProjects = allProjects.filter(p => p.status === 'pendiente');
     const approvedProjects = allProjects.filter(p => p.status === 'aprobado');
     const totalProjects = allProjects.length;
 
-    // Ganancias/pérdidas reales por proyecto (mismo cálculo que la lista de proyectos).
+    // Ganancia neta tomada de cada proyecto: Ingresos sin IVA/IGV - Gastos.
     let earnings = 0;
     let earningsUSD = 0;
     let approvedAmount = 0;
@@ -3000,7 +3152,7 @@ function renderAdministraciones() {
             ${donutLegendHTML}
           </div>
         </div>
-        ` : '<p class="text-sm text-gray-400 text-center py-6">Todavía no hay proyectos con el tipo de cambio cargado. Cargalo en cada proyecto o presupuesto (sección "Tipo de cambio, uso interno") para ver la comparativa acá.</p>'}
+        ` : '<p class="text-sm text-gray-400 text-center py-6">Todavía no hay proyectos con el tipo de cambio cargado. Cargalo en cada proyecto (sección "Tipo de cambio, uso interno") para ver la comparativa acá.</p>'}
       </div>
 
       <div class="grid grid-cols-1 md:grid-cols-3 gap-6">${cards}</div>
@@ -3085,7 +3237,8 @@ function renderTabDocuments(project) {
 }
 
 function renderTabHistory(project) {
-  const createdDate = project.createdAt ? new Date(project.createdAt).toLocaleDateString('es-AR') : '—';
+  const createdDate = parseToMs(project.createdAt) ? new Date(parseToMs(project.createdAt)).toLocaleDateString('es-AR') : '—';
+  const invoices = canGenerateInvoicesForProject(project) ? DB.getInvoicesByProject(project.id) : [];
   return `
     <div class="bg-white border border-gray-200 rounded-2xl p-6">
       <h3 class="font-semibold text-gray-900 mb-4">Historial del proyecto</h3>
@@ -3104,8 +3257,9 @@ function renderTabHistory(project) {
           </div>
         </div>
       </div>
-      <p class="text-xs text-gray-300 mt-6">El historial completo de cambios estara disponible proximamente.</p>
+      ${canGenerateInvoicesForProject(project) ? `<p class="text-sm text-gray-500 mt-6">Las modificaciones de facturas se conservan como versiones. Solo las versiones vigentes se suman al monto del proyecto.</p>` : ''}
     </div>
+    ${invoices.map(inv => `<div class="mt-4"><h4 class="font-semibold mb-2">Factura ${esc(formatInvoiceRef(inv))}</h4>${renderInvoiceHistory(inv)}</div>`).join('')}
   `;
 }
 
@@ -3122,11 +3276,10 @@ function renderSettings(section = 'company', extra) {
     { key: 'security',   label: 'Seguridad' },
     { key: 'clients',    label: 'Clientes' },
     { key: 'categories', label: 'Categorias de Gastos' },
+    { key: 'demo',       label: '📦 Datos de Ejemplo' },
   ];
 
-  if (!sections.some(item => item.key === section)) section = 'company';
-
-  const tabs = `<div class="flex flex-wrap gap-2 ${section === 'terms' ? 'mb-2' : 'mb-6'}">
+  const tabs = `<div class="flex flex-wrap gap-2 mb-6">
     ${sections.map(s => `
       <button class="btn ${section===s.key ? 'btn-primary' : 'btn-secondary'}" onclick="renderSettings('${s.key}')">${s.label}</button>
     `).join('')}
@@ -3138,14 +3291,9 @@ function renderSettings(section = 'company', extra) {
   if (section === 'security') body = renderSecuritySettings();
   if (section === 'clients') body = renderClientSettings();
   if (section === 'categories') body = renderCategorySettings();
+  if (section === 'demo') body = renderDemoDataSettings();
 
-  // Algunas funciones de sección (p. ej. cuando la configuración aún no llegó)
-  // hacen su propio `setContent()` y retornan `undefined`. En ese caso no
-  // debemos sobrescribir lo que ya mostraron (spinner), así que salimos.
-  if (typeof body === 'undefined') return;
-
-  const containerWidth = section === 'terms' ? 'max-w-6xl' : 'max-w-3xl';
-  setContent(`<div class="${containerWidth} mx-auto">${tabs}${body}</div>`);
+  setContent(`<div class="max-w-3xl mx-auto">${tabs}${body}</div>`);
   // Populate session fields if present
   try {
     const enabled = String(localStorage.getItem('aurea_enable_inactivity_watch')) === 'true';
@@ -3266,9 +3414,8 @@ window.saveSecurityPin = async function() {
 
 function renderCompanySettings() {
   const cfg = DB.getConfig();
-  // `undefined` significa que Firebase todavía está cargando. `null` significa
-  // que aún no existe configuración y debe mostrarse el formulario vacío.
-  if (typeof cfg === 'undefined') {
+  // Si la config aún no llegó (modo Firebase), mostrar estado de carga y reintentar al recibir datos
+  if (cfg === null) {
     setContent(`
       <div class="max-w-3xl mx-auto">
         <div class="bg-white border border-gray-200 rounded-2xl p-6 text-center">
@@ -3284,26 +3431,17 @@ function renderCompanySettings() {
         if (ev?.detail?.collection === 'config') {
           window.removeEventListener('db-updated', onUpdate);
           // Re-renderizar cuando ya tengamos la config
-          renderSettings('company');
+          renderCompanySettings();
         }
       } catch (e) { /* ignore */ }
     };
     window.addEventListener('db-updated', onUpdate);
-    // Por si el evento ya se disparó antes de que registráramos el listener,
-    // comprobamos inmediatamente si la config ya está en cache y re-renderizamos.
-    try {
-      const maybe = DB.getConfig();
-      if (typeof maybe !== 'undefined') {
-        window.removeEventListener('db-updated', onUpdate);
-        renderSettings('company');
-      }
-    } catch (e) { /* ignore */ }
     return;
   }
 
-  const c = cfg?.company || {};
+  const c = cfg.company || {};
   return `
-    <div class="bg-white border border-gray-200 rounded-2xl p-5">
+    <div class="bg-white border border-gray-200 rounded-2xl p-6">
       <h3 class="font-semibold text-gray-900 mb-5">Datos de la Empresa</h3>
       
       <!-- Logo Upload -->
@@ -3392,7 +3530,7 @@ window.saveCompanySettings = function() {
 // prioridades (Notas del presupuesto > este texto > texto por defecto).
 function renderTermsSettings(admin) {
   const cfg = DB.getConfig();
-  if (typeof cfg === 'undefined') {
+  if (cfg === null) {
     setContent(`
       <div class="max-w-3xl mx-auto">
         <div class="bg-white border border-gray-200 rounded-2xl p-6 text-center">
@@ -3410,15 +3548,6 @@ function renderTermsSettings(admin) {
       } catch (e) { /* ignore */ }
     };
     window.addEventListener('db-updated', onUpdate);
-    // Por si el evento ya se disparó antes de que registráramos el listener,
-    // comprobamos inmediatamente si la config ya está en cache y re-renderizamos.
-    try {
-      const maybe = DB.getConfig();
-      if (typeof maybe !== 'undefined') {
-        window.removeEventListener('db-updated', onUpdate);
-        renderSettings('terms', admin);
-      }
-    } catch (e) { /* ignore */ }
     return;
   }
 
@@ -3427,7 +3556,7 @@ function renderTermsSettings(admin) {
   const activeAdmin = (admin && ADMIN[admin]) ? admin : (window._termsSettingsAdmin && ADMIN[window._termsSettingsAdmin] ? window._termsSettingsAdmin : 'ARG');
   window._termsSettingsAdmin = activeAdmin;
 
-  const savedText = (cfg?.budgetTerms || {})[activeAdmin];
+  const savedText = (cfg.budgetTerms || {})[activeAdmin];
   const isCustom = savedText != null && savedText !== '';
   const textareaValue = isCustom ? savedText : (DEFAULT_BUDGET_TERMS_TEXT[activeAdmin] || '');
   const adm = ADMIN[activeAdmin];
@@ -3435,31 +3564,29 @@ function renderTermsSettings(admin) {
   return `
     <div class="bg-white border border-gray-200 rounded-2xl p-6">
       <h3 class="font-semibold text-gray-900 mb-2">Condiciones Generales del Presupuesto</h3>
-      <p class="text-sm text-gray-600 mb-3">
+      <p class="text-sm text-gray-600 mb-5">
         Este texto se imprime en la sección "Condiciones Generales" de los presupuestos (PDF y
         vista previa) para la administración elegida abajo, siempre que ese presupuesto no tenga
         su propio texto manual cargado en "Notas". Cada administración tiene su propio texto —
         un cambio acá NO afecta a las otras dos.
       </p>
 
-      <div class="flex flex-wrap gap-2 mb-3">
+      <div class="flex flex-wrap gap-2 mb-5">
         ${['ARG','PERU','USA'].map(code => `
           <button class="btn ${activeAdmin===code ? 'btn-primary' : 'btn-secondary'}" onclick="renderSettings('terms','${code}')">${ADMIN[code].flag} ${ADMIN[code].label}</button>
         `).join('')}
       </div>
 
-      ${isCustom ? '' : `<div class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">Todavía no se guardó un texto propio para ${esc(adm.label)} — se está mostrando el texto por defecto de la app. Podés editarlo y guardarlo cuando quieras.</div>`}
+      ${isCustom ? '' : `<div class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">Todavía no se guardó un texto propio para ${esc(adm.label)} — se está mostrando el texto por defecto de la app. Podés editarlo y guardarlo cuando quieras.</div>`}
 
       <div class="form-group">
         <label class="form-label">Texto (${esc(adm.label)})</label>
-        <div class="flex items-center gap-2 mb-2">
-          <button type="button" class="btn btn-secondary btn-sm" onmousedown="event.preventDefault()" onclick="toggleTermsBold()" title="Negrita" aria-label="Aplicar o quitar negrita">
-            <span style="font-weight:700;font-size:15px;line-height:1">B</span>
-          </button>
-          <span class="text-xs text-gray-500">Seleccioná el texto y presioná B para aplicar o quitar negrita.</span>
-        </div>
-        <div id="terms-editor" class="form-input" contenteditable="true" role="textbox" aria-multiline="true" style="min-height:280px;max-height:420px;overflow-y:auto;font-family:inherit;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere">${termsPlainTextToEditorHtml(textareaValue)}</div>
-        
+        <textarea id="terms-textarea" class="form-input" style="min-height:340px;font-family:inherit;line-height:1.6;resize:vertical" placeholder="Escribí acá las condiciones generales...">${esc(textareaValue)}</textarea>
+        <p class="text-xs text-gray-500 mt-2">
+          Separá cada párrafo con una línea en blanco (Enter dos veces). Para poner una parte en
+          <strong>negrita</strong>, escribila entre doble asterisco, así: **texto en negrita**.
+          No hace falta escribir HTML.
+        </p>
       </div>
 
       <div class="flex flex-wrap gap-2 mt-4">
@@ -3470,45 +3597,10 @@ function renderTermsSettings(admin) {
   `;
 }
 
-window.toggleTermsBold = function() {
-  const editor = document.getElementById('terms-editor');
-  if (!editor) return;
-  editor.focus();
-  document.execCommand('bold', false, null);
-};
-
-function termsPlainTextToEditorHtml(text) {
-  return esc(String(text || ''))
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\r?\n/g, '<br>');
-}
-
-function termsEditorToPlainText(editor) {
-  const serialize = (node) => {
-    if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || '';
-    if (node.nodeType !== Node.ELEMENT_NODE) return '';
-
-    const tag = node.tagName.toLowerCase();
-    const content = Array.from(node.childNodes).map(serialize).join('');
-    if (tag === 'br') return '\n';
-    if (tag === 'strong' || tag === 'b') return `**${content}**`;
-    if (tag === 'div' || tag === 'p') return `${content}\n`;
-    return content;
-  };
-
-  return Array.from(editor.childNodes)
-    .map(serialize)
-    .join('')
-    .replace(/\u00a0/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
 window.saveBudgetTermsSettings = function(admin) {
   const cfg = DB.getConfig() || {};
   cfg.budgetTerms = cfg.budgetTerms || {};
-  const editor = document.getElementById('terms-editor');
-  const text = editor ? termsEditorToPlainText(editor) : '';
+  const text = document.getElementById('terms-textarea')?.value ?? '';
   cfg.budgetTerms[admin] = text;
   DB.setConfig(cfg);
   notify(`Condiciones guardadas para ${ADMIN[admin]?.label || admin}`);
@@ -4074,6 +4166,8 @@ window.buildBudgetHtmlFragment = function(budget) {
     country: isEnglish ? 'Country' : 'País',
     city: isEnglish ? 'City' : 'Ciudad',
     eventDate: isEnglish ? 'Event Date' : 'Fecha del Evento',
+    projectType: isEnglish ? 'Project Type' : 'Tipo de Proyecto',
+    assemblyDate: isEnglish ? 'Assembly Date' : 'Fecha de Armado',
     setupDate: isEnglish ? 'Setup Date' : 'Fecha de Montaje',
     date: isEnglish ? 'Date' : 'Fecha',
     description: isEnglish ? 'Description' : 'Descripción',
@@ -4087,8 +4181,7 @@ window.buildBudgetHtmlFragment = function(budget) {
     generatedOn: isEnglish ? 'Document generated on' : 'Documento generado el',
   };
   const displayNumber = formatBudgetRef(budget.number ?? budget.budgetNumber ?? '(sin número)');
-  // eventBoxHTML: genera cada una de las 4 cajitas grises de "Datos del Evento"
-  // (País/Ciudad/Fecha del Evento/Fecha de Montaje). "label" es el font-size:9px
+  // eventBoxHTML: genera las cajitas grises de "Datos del Evento". "label" es el font-size:9px
   // de arriba (la etiqueta en mayúscula) y "value" es el font-size:12px de abajo
   // (el dato en sí). "padding:12px" es el aire interno de la cajita — si el
   // texto no entra en un renglón, primero probar bajando el font-size del value
@@ -4101,7 +4194,7 @@ window.buildBudgetHtmlFragment = function(budget) {
   `;
 
   return `
-    <div style="font-family:'Aktiv Grotesk';max-width:750px;margin:0 auto;padding:40px;color:#1e293b">
+    <div style="font-family:'Inter',Arial,sans-serif;max-width:750px;margin:0 auto;padding:40px;color:#1e293b">
       <!-- [SECCIÓN: HEADER]
            Header alineado por ABAJO: izquierda = datos de la empresa (nombre en negro;
            orden Dirección, Dirección línea 2, Teléfono, Mail — la URL del sitio web NO va
@@ -4152,11 +4245,13 @@ window.buildBudgetHtmlFragment = function(budget) {
         </div>
       </div>
 
-      <!-- [SECCIÓN: DATOS DEL EVENTO] (país, ciudad, fecha del evento, fecha de montaje) -->
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:20px">
+      <!-- [SECCIÓN: DATOS DEL EVENTO] -->
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px">
         ${eventBoxHTML(t.country, budget.country)}
         ${eventBoxHTML(t.city, budget.city)}
+        ${eventBoxHTML(t.projectType, budget.projectType)}
         ${eventBoxHTML(t.eventDate, budget.eventDate ? fmtDate(budget.eventDate) : '')}
+        ${eventBoxHTML(t.assemblyDate, budget.assemblyDate ? fmtDate(budget.assemblyDate) : '')}
         ${eventBoxHTML(t.setupDate, budget.setupDate ? fmtDate(budget.setupDate) : '')}
       </div>
 
@@ -4330,9 +4425,8 @@ window.exportBudgetPDF = function(budgetId) {
     return;
   }
 
-  // Wait for fonts to be ready so html2canvas embeds the webfont in the canvas
-  Promise.resolve(typeof document.fonts !== 'undefined' ? document.fonts.ready : Promise.resolve()).then(() => {
-    return html2pdf().set({
+  try {
+    html2pdf().set({
       margin: 10,
       filename: fileName,
       image: { type: 'jpeg', quality: 0.98 },
@@ -4349,15 +4443,19 @@ window.exportBudgetPDF = function(budgetId) {
       // Generales, cada párrafo, la tabla de ítems, el total) para no cortarlos a la mitad
       // entre dos páginas. 'legacy' es el resto del comportamiento de paginación por defecto.
       pagebreak: { mode: ['css', 'legacy'] },
-    }).from(el).save();
-  }).then(() => {
+    }).from(el).save().then(() => {
+      document.body.removeChild(el);
+      notify('PDF generado correctamente');
+    }).catch(err => {
+      document.body.removeChild(el);
+      console.error('Error generando PDF (budget):', err);
+      notify('Error generando PDF: ' + (err && err.message ? err.message : String(err)), 'error');
+    });
+  } catch (err) {
     document.body.removeChild(el);
-    notify('PDF generado correctamente');
-  }).catch(err => {
-    document.body.removeChild(el);
-    console.error('Error generando PDF (budget):', err);
+    console.error('Error iniciando html2pdf (budget):', err);
     notify('Error generando PDF: ' + (err && err.message ? err.message : String(err)), 'error');
-  });
+  }
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -4371,8 +4469,16 @@ window.exportBudgetPDF = function(budgetId) {
 // datos generales, celdas de la tabla y "Bill To"/"Project"; 16px para el
 // nombre del cliente/proyecto; 20px para el título Factura/Invoice; 24px
 // para el número de factura; 26px para el monto total en el cuadro naranja.
-function buildInvoiceHtmlFragment(invoiceId) {
-  const inv = DB.get('invoices', invoiceId);
+function getInvoiceVersion(invoiceId, version) {
+  const current = DB.get('invoices', invoiceId);
+  if (!current) return null;
+  if (version == null || version === (current.version || 1)) return current;
+  const historical = (current.history || []).find(entry => entry.version === version);
+  return historical ? { ...historical, projectId: current.projectId, id: current.id } : null;
+}
+
+function buildInvoiceHtmlFragment(invoiceId, version) {
+  const inv = getInvoiceVersion(invoiceId, version);
   if (!inv) return '';
 
   const project = DB.get('projects', inv.projectId);
@@ -4412,7 +4518,7 @@ function buildInvoiceHtmlFragment(invoiceId) {
   }
 
   return `
-    <div style="font-family:'Aktiv Grotesk';max-width:720px;margin:0 auto;padding:40px;color:#1e293b">
+    <div style="font-family:'Inter',Arial,sans-serif;max-width:720px;margin:0 auto;padding:40px;color:#1e293b">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid ${pdfBrandColor};padding-bottom:20px;margin-bottom:30px">
         <div style="flex:1">
           ${comp.logo ? `<img src="${comp.logo}" style="max-width:150px;max-height:80px;margin-bottom:12px;object-fit:contain" />` : ''}
@@ -4479,28 +4585,22 @@ function buildInvoiceHtmlFragment(invoiceId) {
       ${inv.notes ? `<div style="background:#f8fafc;border-radius:10px;padding:16px;margin-bottom:24px"><p style="font-size:11px;text-transform:uppercase;font-weight:700;color:#94a3b8;margin:0 0 6px">${t.notes}</p><p style="font-size:13px;color:#374151;white-space:pre-wrap;margin:0">${esc(inv.notes)}</p></div>` : ''}
 
       <p style="text-align:center;font-size:11px;color:#cbd5e1;margin-top:30px;border-top:1px solid #f1f5f9;padding-top:16px">
-        ${esc(comp.name||'Aurea')} · ${t.generated} ${fmtDate(today())}
+        ${esc(comp.name||'Aurea')} · ${t.generated} ${fmtDate(inv.date)}
       </p>
     </div>
   `;
 }
 
-const PDF_PREVIEW_FONT_STYLES = `<style>
-  @font-face { font-family:'Aktiv Grotesk'; src:url('/fonts/AktivGrotesk-Regular.woff2') format('woff2'); font-weight:400; font-style:normal; font-display:swap; }
-  @font-face { font-family:'Aktiv Grotesk'; src:url('/fonts/AktivGrotesk-Bold.woff2') format('woff2'); font-weight:700; font-style:normal; font-display:swap; }
-  body, button { font-family:'Aktiv Grotesk'; }
-</style>`;
-
-window.previewInvoicePDF = function(invoiceId) {
-  const inv = DB.get('invoices', invoiceId);
-  if (!inv) { notify('Factura no encontrada', 'error'); return; }
+window.previewInvoicePDF = function(invoiceId, version) {
+  const inv = getInvoiceVersion(invoiceId, version);
+  if (!inv) { notify('Factura o versión no encontrada', 'error'); return; }
   const project = DB.get('projects', inv.projectId);
   if (!project || !canGenerateInvoicesForProject(project)) {
     notify('Solo la administración United States puede generar facturas.', 'error');
     return;
   }
 
-  const fragment = buildInvoiceHtmlFragment(invoiceId);
+  const fragment = buildInvoiceHtmlFragment(invoiceId, version);
   if (!fragment) {
     notify('No se pudo armar la vista previa de la factura.', 'error');
     return;
@@ -4508,7 +4608,7 @@ window.previewInvoicePDF = function(invoiceId) {
 
   const invRaw = inv.number ?? inv.invoiceNumber ?? '(sin número)';
   const displayNumber = formatBudgetRef(String(invRaw)) || '(sin número)';
-  const html = `<!doctype html><html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vista previa — ${esc(displayNumber)}</title>${PDF_PREVIEW_FONT_STYLES}</head><body><div style="margin-bottom:12px"><button onclick="(function(){ if(window.opener && typeof window.opener.exportInvoicePDF==='function'){ window.opener.exportInvoicePDF('${invoiceId}'); } else { alert('No se puede exportar desde aquí'); } })()" style="padding:8px 12px;margin-right:8px">Exportar PDF</button><button onclick="window.print()" style="padding:8px 12px">Imprimir</button></div>${fragment}</body></html>`;
+  const html = `<!doctype html><html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vista previa — ${esc(displayNumber)}</title></head><body><div style="margin-bottom:12px"><button onclick="(function(){ if(window.opener && typeof window.opener.exportInvoicePDF==='function'){ window.opener.exportInvoicePDF('${invoiceId}',${inv.version || 1}); } else { alert('No se puede exportar desde aquí'); } })()" style="padding:8px 12px;margin-right:8px">Exportar PDF</button><button onclick="window.print()" style="padding:8px 12px">Imprimir</button></div>${fragment}</body></html>`;
 
   const w = window.open('', '_blank', 'width=900,height=800,scrollbars=yes');
   if (!w) { notify('El navegador bloqueó la ventana emergente. Permití popups para previsualizar.', 'warning'); return; }
@@ -4517,16 +4617,16 @@ window.previewInvoicePDF = function(invoiceId) {
   w.document.close();
 };
 
-window.exportInvoicePDF = function(invoiceId) {
-  const inv = DB.get('invoices', invoiceId);
-  if (!inv) { notify('Factura no encontrada', 'error'); return; }
+window.exportInvoicePDF = function(invoiceId, version) {
+  const inv = getInvoiceVersion(invoiceId, version);
+  if (!inv) { notify('Factura o versión no encontrada', 'error'); return; }
   const project = DB.get('projects', inv.projectId);
   if (!project || !canGenerateInvoicesForProject(project)) {
     notify('Solo la administración United States puede generar facturas.', 'error');
     return;
   }
 
-  const html = buildInvoiceHtmlFragment(invoiceId);
+  const html = buildInvoiceHtmlFragment(invoiceId, version);
   if (!html) {
     notify('No se pudo generar la factura.', 'error');
     return;
@@ -4556,9 +4656,8 @@ window.exportInvoicePDF = function(invoiceId) {
     return;
   }
 
-  // Wait for fonts to be ready so html2canvas embeds the webfont in the canvas
-  Promise.resolve(typeof document.fonts !== 'undefined' ? document.fonts.ready : Promise.resolve()).then(() => {
-    return html2pdf().set({
+  try {
+    html2pdf().set({
       margin: 10,
       filename: fileName,
       image: { type: 'jpeg', quality: 0.98 },
@@ -4575,15 +4674,19 @@ window.exportInvoicePDF = function(invoiceId) {
       // Generales, cada párrafo, la tabla de ítems, el total) para no cortarlos a la mitad
       // entre dos páginas. 'legacy' es el resto del comportamiento de paginación por defecto.
       pagebreak: { mode: ['css', 'legacy'] },
-    }).from(el).save();
-  }).then(() => {
+    }).from(el).save().then(() => {
+      document.body.removeChild(el);
+      notify('PDF generado correctamente');
+    }).catch(err => {
+      document.body.removeChild(el);
+      console.error('Error generando PDF (invoice):', err);
+      notify('Error generando PDF: ' + (err && err.message ? err.message : String(err)), 'error');
+    });
+  } catch (err) {
     document.body.removeChild(el);
-    notify('PDF generado correctamente');
-  }).catch(err => {
-    document.body.removeChild(el);
-    console.error('Error generando PDF (invoice):', err);
+    console.error('Error iniciando html2pdf (invoice):', err);
     notify('Error generando PDF: ' + (err && err.message ? err.message : String(err)), 'error');
-  });
+  }
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -4611,7 +4714,7 @@ window.previewBudgetPDF = function(budgetId) {
 
   const fragment = window.buildBudgetHtmlFragment(budget);
   const displayNumber = formatBudgetRef(budget.number ?? budget.budgetNumber ?? '(sin número)');
-  const html = `<!doctype html><html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vista previa — ${esc(displayNumber)}</title>${PDF_PREVIEW_FONT_STYLES}</head><body><div style="margin-bottom:12px"><button onclick="(function(){ if(window.opener && typeof window.opener.exportBudgetPDF==='function'){ window.opener.exportBudgetPDF('${budgetId}'); } else { alert('No se puede exportar desde aquí'); } })()" style="padding:8px 12px;margin-right:8px">Exportar PDF</button><button onclick="window.print()" style="padding:8px 12px">Imprimir</button></div>${fragment}</body></html>`;
+  const html = `<!doctype html><html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vista previa — ${esc(displayNumber)}</title></head><body><div style="margin-bottom:12px"><button onclick="(function(){ if(window.opener && typeof window.opener.exportBudgetPDF==='function'){ window.opener.exportBudgetPDF('${budgetId}'); } else { alert('No se puede exportar desde aquí'); } })()" style="padding:8px 12px;margin-right:8px">Exportar PDF</button><button onclick="window.print()" style="padding:8px 12px">Imprimir</button></div>${fragment}</body></html>`;
 
   const w = window.open('', '_blank', 'width=900,height=800,scrollbars=yes');
   if (!w) { notify('El navegador bloqueó la ventana emergente. Permití popups para previsualizar.', 'warning'); return; }

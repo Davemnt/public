@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Aurea v2 - Login</title>
+  <title>Aurea - Login</title>
   
   <!-- Favicons -->
   <!-- Use favicon.png provided by the user for all icon links -->
@@ -58,12 +58,11 @@
     }
 
     body {
-      background: var(--c-body) !important;
+      background: url('image/patron-aurea.png') center / cover fixed no-repeat;
       min-height: 100vh;
       position: relative;
     }
     
-    /* Seguridad: fondo forzado que no se puede quitar */
     body::before {
       content: '';
       position: fixed;
@@ -71,21 +70,24 @@
       left: 0;
       right: 0;
       bottom: 0;
-      background: var(--c-body);
-      z-index: -1;
+      background: rgba(0, 0, 0, 0.28);
+      z-index: 0;
       pointer-events: none;
     }
-    
-    body::after {
-      content: '';
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background: var(--c-body);
-      z-index: -2;
-      pointer-events: none;
+
+    #login-screen,
+    #register-screen,
+    #recovery-screen {
+      position: relative;
+      z-index: 1;
+    }
+
+    .login-logo {
+      display: block;
+      width: min(220px, 75%);
+      height: auto;
+      margin: 0 auto 0.5rem;
+      border-radius: 14px;
     }
     
     .shake {
@@ -116,7 +118,7 @@
       
       <!-- Logo / Título -->
       <div class="text-center mb-8">
-        <h1 class="text-4xl font-bold mb-2" style="color: var(--c-text-dark);">Aurea v2</h1>
+        <img src="image/favicon.png" alt="Aurea" class="login-logo">
         <p style="color: var(--c-text-light);">Gestión de Presupuestos</p>
       </div>
       
@@ -320,19 +322,6 @@
   <!-- Scripts -->
   <script src="firebase-config.js"></script>
   <script src="auth.js"></script>
-  
-  <!-- Protección ligera contra inspección -->
-  <script>
-    (function() {
-      'use strict';
-      
-      // Protección simple: inyectar estilos inline en el body al cargar
-      document.addEventListener('DOMContentLoaded', function() {
-        document.body.style.setProperty('background', '#008f82', 'important');
-        document.body.style.setProperty('background-color', '#008f82', 'important');
-      });
-    })();
-  </script>
   
   <script>
     // ========================================
