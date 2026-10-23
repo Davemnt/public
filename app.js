@@ -161,8 +161,31 @@ let _reportingYear = new Date().getFullYear();
 
 function recordYear(record) {
   const raw = record && (record.date || record.createdAt || record.created || record.created_at || record.startDate || record.start_date);
+  // "YYYY-MM-DD" se lee directo: Date.parse lo toma como UTC y en Argentina/Perú (UTC-3/-5)
+  // el 1° de enero caía en el año anterior. Mismo criterio que _recordYear en db-firebase.js.
+  const isoYear = typeof raw === 'string' && raw.match(/^(\d{4})-/);
+  if (isoYear) return Number(isoYear[1]);
   const timestamp = parseToMs(raw);
   return timestamp ? new Date(timestamp).getFullYear() : 0;
+}
+
+// Línea "≈ USD" de una administración (ARG/PERU). Los proyectos sin tipo de cambio quedan
+// fuera de este monto y de los gráficos, así que se listan por nombre (con link y su
+// ganancia) para que se puedan identificar y completar.
+function usdEquivalentNote(adm, usd) {
+  if (adm === 'USA') return '';
+  const base = usd ? '≈ ' + fmtCurrency(usd, 'USA') : 'Cargá el dólar para ver el equivalente';
+  const missing = (DB.getAll('projects') || [])
+    .filter(p => p.administration === adm && recordYear(p) === _reportingYear)
+    .map(p => ({ p, fin: DB.getProjectFinancials(p.id) }))
+    // Con ganancia 0 el dólar no cambia ningún total: no se listan (evita avisos sin sentido).
+    .filter(({ fin }) => !fin.exchangeRateToUSD && fin.profit);
+  if (!missing.length) return base;
+  const items = missing.map(({ p, fin }) =>
+    `<li><a class="underline cursor-pointer" onclick="navigate('#/projects/${p.id}')">${esc(p.name)}</a> · ganancia ${fmtCurrency(fin.profit, adm)}</li>`).join('');
+  return `${base}
+    <span class="block mt-2 text-amber-700">Proyectos sin dólar cargado (no suman en USD):</span>
+    <ul class="text-amber-700 list-disc pl-4">${items}</ul>`;
 }
 
 function getReportingYears() {
@@ -573,7 +596,7 @@ function renderDashboard() {
               <div>
                 <p class="text-xs font-semibold text-gray-500 uppercase">Argentina</p>
                 <p class="text-xl font-bold" style="color: ${ADMIN.ARG.flagColor}">${fmtCurrency(s.earningsARG, 'ARG')}</p>
-                <p class="text-xs text-gray-400 mt-0.5">${s.earningsARG_USD ? '≈ ' + fmtCurrency(s.earningsARG_USD, 'USA') : 'Cargá el dólar en tus proyectos ARG'}</p>
+                <div class="text-xs text-gray-400 mt-0.5">${usdEquivalentNote('ARG', s.earningsARG_USD)}</div>
               </div>
             </div>
           </div>
@@ -583,7 +606,7 @@ function renderDashboard() {
               <div>
                 <p class="text-xs font-semibold text-gray-500 uppercase">Perú</p>
                 <p class="text-xl font-bold" style="color: ${ADMIN.PERU.flagColor}">${fmtCurrency(s.earningsPERU, 'PERU')}</p>
-                <p class="text-xs text-gray-400 mt-0.5">${s.earningsPERU_USD ? '≈ ' + fmtCurrency(s.earningsPERU_USD, 'USA') : 'Cargá el dólar en tus proyectos PERU'}</p>
+                <div class="text-xs text-gray-400 mt-0.5">${usdEquivalentNote('PERU', s.earningsPERU_USD)}</div>
               </div>
             </div>
           </div>
@@ -727,19 +750,10 @@ function renderProjects() {
     return tb - ta; // most recent first
   });
 
-  // Debug: print computed timestamps to console to help diagnose ordering
-  try {
-    console.log('[projects] ordering debug: id, name, rawDate, ts');
-    projects.forEach(p => {
-      const raw = pick(p);
-      console.log(p.id, p.name, raw, toMs(raw));
-    });
-  } catch (e) { /* ignore */ }
-
   const rowsHTML = projects.length ? projects.map(p => {
     const fin = DB.getProjectFinancials(p.id);
     const adm = ADMIN[p.administration] || ADMIN.ARG;
-    return `<tr onclick="navigate('#/projects/${p.id}')" class="cursor-pointer">
+    return `<tr onclick="navigate('#/projects/${p.id}')" class="cursor-pointer" data-admin="${esc(p.administration || '')}" data-status="${esc(p.status || '')}">
       <td>
         <div class="font-semibold text-gray-900">${esc(p.name)}</div>
         <div class="text-xs text-gray-400 mt-0.5">${esc(p.client||'—')}</div>
@@ -810,9 +824,11 @@ function filterProjects() {
   const rows = document.querySelectorAll('#projects-body tr');
   rows.forEach(r => {
     const txt = r.textContent.toLowerCase();
+    // Estado y administración se comparan contra los data-* de la fila, no contra el texto:
+    // un proyecto USA con "Argentina" en el nombre aparecía al filtrar por Argentina.
     const matches = (!q || txt.includes(q)) &&
-      (!fst || r.innerHTML.includes(`value="${fst}"`) || r.innerHTML.includes(PROJECT_STATUS[fst]?.label || '')) &&
-      (!fadm || r.innerHTML.includes(ADMIN[fadm]?.label || ''));
+      (!fst || r.dataset.status === fst) &&
+      (!fadm || r.dataset.admin === fadm);
     r.style.display = matches ? '' : 'none';
   });
 }
@@ -1020,12 +1036,11 @@ async function renderProjectDetail(id, tab = 'info') {
             <p class="text-gray-500 text-sm mt-1">${esc(project.client||'Sin cliente')} · ${fmtDate(project.date)}</p>
           </div>
           <div class="flex gap-6 text-center">
-            ${['totalIncome','totalExpense','profit'].map((k,i) => {
-              const fin = DB.getProjectFinancials(id);
+            ${((fin) => ['totalIncome','totalExpense','profit'].map((k,i) => {
               const labels = ['Ingresos','Gastos','Ganancia'];
               const colors = ['text-green-600','text-red-600', fin.profit >= 0 ? 'text-green-600':'text-red-600'];
               return `<div><p class="text-xs text-gray-400 mb-1">${labels[i]}</p><p class="font-bold ${colors[i]}">${fmtCurrency(fin[k], project.administration)}</p></div>`;
-            }).join('')}
+            }).join(''))(DB.getProjectFinancials(id))}
           </div>
         </div>
       </div>
@@ -2974,7 +2989,7 @@ function renderAllInvoices() {
   const rows = invoices.map(inv => {
     const p = pMap[inv.projectId] || {};
     const total = calcBudgetTotal(inv.items || []);
-    return `<tr>
+    return `<tr data-status="${esc(inv.status || '')}">
       <td class="font-medium text-gray-900">${esc(formatInvoiceRef(inv))}</td>
       <td><a onclick="navigate('#/projects/${p.id}/invoices/${inv.id}')" class="font-semibold cursor-pointer" style="color: #de591f;" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">${esc(p.name||'—')}</a></td>
       <td class="text-gray-600">${esc(inv.clientName || p.client||'—')}</td>
@@ -3015,7 +3030,7 @@ function filterAllInvoices() {
   const q = (document.getElementById('q-inv')?.value||'').toLowerCase();
   const fst = document.getElementById('fi-status')?.value||'';
   document.querySelectorAll('#inv-global-body tr').forEach(r => {
-    const show = (!q || r.textContent.toLowerCase().includes(q)) && (!fst || r.innerHTML.includes(INVOICE_STATUS[fst]?.label||''));
+    const show = (!q || r.textContent.toLowerCase().includes(q)) && (!fst || r.dataset.status === fst);
     r.style.display = show ? '' : 'none';
   });
 }
@@ -3080,7 +3095,7 @@ function renderAdministraciones() {
         <div class="p-4 rounded-xl text-center mb-4 w-full min-w-0 overflow-hidden" style="background: ${a.flagColor}20; border: 2px solid ${a.flagColor}40">
           <p class="text-xs font-bold uppercase mb-2" style="color: ${a.flagColor}">Ganancias Totales</p>
           <p class="text-xl md:text-2xl font-bold leading-none break-all" style="color: ${a.flagColor}">${fmtCurrency(earnings, key)}</p>
-          <p class="text-xs text-gray-500 mt-1">${earningsUSD ? '≈ ' + fmtCurrency(earningsUSD, 'USA') : (key === 'USA' ? '' : 'Cargá el dólar para ver el equivalente')}</p>
+          <div class="text-xs text-gray-500 mt-1">${usdEquivalentNote(key, earningsUSD)}</div>
         </div>
 
         <button onclick="filterProjectsByAdmin('${key}')" class="btn btn-secondary btn-sm w-full">

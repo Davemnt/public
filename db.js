@@ -311,7 +311,10 @@ const DB = (() => {
     // presupuesto podía traer decimales (por el cálculo de IVA/IGV) y aparecía una
     // diferencia de $1 entre la lista y el total (suma de redondeados ≠ redondeo de la suma).
     const remaining = Math.round(budgetTotal - totalExpense);
-    const profit = Math.round((adm === 'USA' && project.invoiceTotals ? budgetTotal : totalIncome) - totalExpense);
+    // Ganancia = Ingresos - Gastos para TODAS las administraciones (pedido del cliente).
+    // Antes USA con facturación usaba lo facturado como base, y no coincidía con la columna
+    // Ingresos (y daba -Gastos cuando se borraban las facturas).
+    const profit = Math.round(totalIncome - totalExpense);
     const percentUsed = budgetTotal > 0 ? (totalExpense / budgetTotal) * 100 : 0;
     // Conversión a USD (moneda local por 1 USD). USA = 1 por defecto.
     // El tipo de cambio se carga en el PROYECTO (campo exchangeRateToUSD) — es la única

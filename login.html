@@ -455,8 +455,9 @@
         return;
       }
       
+      // Fuera del try: el catch lo necesita para rehabilitar el botón si falla
+      const submitBtn = registerForm.querySelector('button[type="submit"]');
       try {
-        const submitBtn = registerForm.querySelector('button[type="submit"]');
         submitBtn.disabled = true;
         submitBtn.textContent = 'Creando cuenta...';
         
@@ -507,8 +508,9 @@
       
       const email = document.getElementById('recovery-email').value.trim();
       
+      // Fuera del try: el catch lo necesita para rehabilitar el botón si falla
+      const submitBtn = recoveryForm.querySelector('button[type="submit"]');
       try {
-        const submitBtn = recoveryForm.querySelector('button[type="submit"]');
         submitBtn.disabled = true;
         submitBtn.textContent = 'Enviando...';
         

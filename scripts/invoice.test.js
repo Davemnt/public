@@ -159,9 +159,9 @@ for (const [label, adapter, production] of [
     assert.equal(invoice.history[0].clientName, 'Invoice client');
     assert.equal(c.DB.get('projects', 'p').budgetAmount, 250);
     assert.equal(c.DB.getProjectFinancials('p').budgetTotal, 250);
-    assert.equal(c.DB.getProjectFinancials('p').profit, 250, 'USA profit must follow the current invoice amount without adding income records');
+    assert.equal(c.DB.getProjectFinancials('p').profit, 0, 'USA profit is Ingresos - Gastos; invoices alone do not count as income');
     await c.DB.add('expenses', { projectId: 'p', amount: 25 });
-    assert.equal(c.DB.getProjectFinancials('p').profit, 225);
+    assert.equal(c.DB.getProjectFinancials('p').profit, -25);
     const oldPdf = c.buildInvoiceHtmlFragment(invoice.id, 1);
     assert.ok(oldPdf.includes(c.formatBudgetRef(originalNumber)));
     assert.ok(oldPdf.includes('Original service'));

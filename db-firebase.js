@@ -241,62 +241,59 @@ const DB = (() => {
    * Inicia listener de tiempo real para una colección
    * IMPORTANTE: Se ejecuta automáticamente en init()
    */
+  // Devuelve una promesa que se resuelve con el PRIMER snapshot (o con el error), así init()
+  // puede esperar la carga inicial sin hacer una lectura aparte con .get().
   function _startListener(col) {
-    if (listeners[col]) return; // Ya existe
-    
+    if (listeners[col]) return Promise.resolve(); // Ya existe
+
     const collectionRef = _getCollection(col);
-    
-    listeners[col] = collectionRef.onSnapshot(
-      (snapshot) => {
-        const data = [];
-        snapshot.forEach(doc => {
-          data.push({ id: doc.id, ...doc.data() });
-        });
-        cache[col] = data;
-        
-        // Disparar evento personalizado para que app.js reaccione
-        window.dispatchEvent(new CustomEvent('db-updated', { 
-          detail: { collection: col, data } 
-        }));
-      },
-      (error) => {
-        console.error(`Error en listener de ${col}:`, error);
-      }
-    );
+
+    return new Promise(resolve => {
+      listeners[col] = collectionRef.onSnapshot(
+        (snapshot) => {
+          const data = [];
+          snapshot.forEach(doc => {
+            data.push({ id: doc.id, ...doc.data() });
+          });
+          cache[col] = data;
+          resolve();
+
+          // Disparar evento personalizado para que app.js reaccione
+          window.dispatchEvent(new CustomEvent('db-updated', {
+            detail: { collection: col, data }
+          }));
+        },
+        (error) => {
+          console.error(`Error en listener de ${col}:`, error);
+          resolve();
+        }
+      );
+    });
   }
-  
+
   /**
    * Inicia listener para la configuración
    */
   function _startConfigListener() {
+    if (listeners['config']) return Promise.resolve();
     const userId = _getUserId();
     const configRef = db.collection('users').doc(userId).collection('config').doc('company');
-    
-    listeners['config'] = configRef.onSnapshot(
-      (doc) => {
-        cache.config = doc.exists ? doc.data() : null;
-        window.dispatchEvent(new CustomEvent('db-updated', { 
-          detail: { collection: 'config', data: cache.config } 
-        }));
-      },
-      (error) => {
-        console.error('Error en listener de config:', error);
-      }
-    );
-  }
 
-  async function _hydrateCollection(col) {
-    try {
-      const snapshot = await _getCollection(col).get();
-      const data = [];
-      snapshot.forEach(doc => data.push({ id: doc.id, ...doc.data() }));
-      cache[col] = data;
-      return data;
-    } catch (error) {
-      console.error(`Error cargando ${col} desde Firestore:`, error);
-      cache[col] = [];
-      return [];
-    }
+    return new Promise(resolve => {
+      listeners['config'] = configRef.onSnapshot(
+        (doc) => {
+          cache.config = doc.exists ? doc.data() : null;
+          resolve();
+          window.dispatchEvent(new CustomEvent('db-updated', {
+            detail: { collection: 'config', data: cache.config }
+          }));
+        },
+        (error) => {
+          console.error('Error en listener de config:', error);
+          resolve();
+        }
+      );
+    });
   }
   
   // ========================================
@@ -815,7 +812,10 @@ const DB = (() => {
 
     // La ganancia es el número que se muestra y suma en Proyectos, Inicio y
     // Administraciones. Se redondea una sola vez para que los totales coincidan con las filas.
-    const profit = Math.round((project.administration === 'USA' && project.invoiceTotals ? budgetTotal : totalIncome) - totalExpense);
+    // Ganancia = Ingresos - Gastos para TODAS las administraciones (pedido del cliente).
+    // Antes USA con facturación usaba lo facturado como base, y no coincidía con la columna
+    // Ingresos (y daba -Gastos cuando se borraban las facturas).
+    const profit = Math.round(totalIncome - totalExpense);
     // Redondeamos "remaining" a un número entero de moneda local ACÁ, en el único lugar
     // donde se calcula. Así, la lista de Proyectos (que muestra cada fin.remaining por
     // fila) y Administraciones/Inicio (que SUMAN fin.remaining de todos los proyectos y
@@ -1006,13 +1006,25 @@ const DB = (() => {
    * init - Inicializa listeners de Firestore
    * IMPORTANTE: Debe llamarse después del login
    */
-  async function init() {
+  // init() se llama desde index.html (al confirmar la sesión) y desde app.js (DOMContentLoaded).
+  // Antes cada llamada descargaba todo de nuevo; ahora comparten la misma carga.
+  let _initPromise = null;
+  function init() {
+    if (!_initPromise) {
+      _initPromise = _init().then(ok => {
+        if (!ok) _initPromise = null; // sin sesión todavía: permitir reintentar
+      });
+    }
+    return _initPromise;
+  }
+
+  async function _init() {
     // MODO DEMO: No hay listeners, todo funciona con localStorage
     if (window.isDemoMode) {
       console.log('✅ DB inicializado en MODO DEMO (localStorage)');
-      return;
+      return true;
     }
-    
+
     // MODO PRODUCCIÓN: Iniciar listeners de Firestore
     try {
       if (!Auth.isAuthenticated()) {
@@ -1032,29 +1044,21 @@ const DB = (() => {
 
       if (!Auth.isAuthenticated()) {
         console.warn('⚠️ Usuario no autenticado, no se pueden inicializar listeners');
-        return;
+        return false;
       }
 
+      // Antes: 8 lecturas .get() en serie (una espera por colección) y DESPUÉS los listeners,
+      // que volvían a descargar todo. Ahora los listeners arrancan en paralelo y su primer
+      // snapshot es la carga inicial.
       const collections = ['budgets', 'projects', 'clients', 'incomes', 'expenses', 'operations', 'invoices'];
-      for (const col of collections) {
-        await _hydrateCollection(col);
-      }
-      await _hydrateCollection('config');
+      await Promise.all([...collections.map(_startListener), _startConfigListener()]);
 
-      // Iniciar listeners para todas las colecciones
-      _startListener('budgets');
-      _startListener('projects');
-      _startListener('clients');
-      _startListener('incomes');
-      _startListener('expenses');
-      _startListener('operations');
-      _startListener('invoices');
-      _startConfigListener();
-      
       console.log('✅ DB inicializado con caché y listeners en tiempo real');
-      
+      return true;
+
     } catch (error) {
       console.error('❌ Error inicializando DB:', error);
+      return false;
     }
   }
   
@@ -1068,7 +1072,9 @@ const DB = (() => {
         unsubscribe();
       }
     });
-    
+    Object.keys(listeners).forEach(k => delete listeners[k]);
+    _initPromise = null;
+
     // Limpiar cache
     cache.budgets = [];
     cache.projects = [];
